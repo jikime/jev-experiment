@@ -3,7 +3,8 @@ import { seededRandom } from './core/random.js';
 import { boardStats } from './core/placements.js';
 import { BotDriver } from './ai/driver.js';
 import { HeuristicBrain } from './ai/heuristic.js';
-import { JEV_PRICE_PER_MTOK, JevBrain, jevStatus } from './ai/jev.js';
+import { GATE_CONFIDENCE, JEV_PRICE_PER_MTOK, JevBrain, jevStatus } from './ai/jev.js';
+import { parseStrategy, policyLabel } from './ai/strategy.js';
 import { BoardRenderer, PreviewRenderer } from './ui/renderer.js';
 import { describeClear, formatNumber } from './ui/hud.js';
 
@@ -26,8 +27,8 @@ function settleMsFor(speed) {
 
 const LANES = [
   { id: 'human', name: '나', tag: '키보드로 직접' },
-  { id: 'jev', name: 'Jev', tag: 'TypeSafe System One' },
-  { id: 'heuristic', name: '휴리스틱', tag: '코드만 · El-Tetris 가중치' },
+  { id: 'jev', name: 'Jev', tag: 'TypeSafe · 애매하면 다시 묻기' },
+  { id: 'heuristic', name: '휴리스틱', tag: '코드만 · El-Tetris + 한 수 앞' },
 ];
 
 const ROTATION_KO = ['회전 없음', '시계 90°', '180°', '반시계 90°'];
@@ -94,6 +95,7 @@ export class Versus {
     this.el = {
       info: $('#vs-info'),
       jev: $('#vs-jev'),
+      policy: $('#vs-policy'),
       speed: $('#vs-speed'),
       speedValue: $('#vs-speed-value'),
       countdown: $('#vs-countdown'),
@@ -118,16 +120,21 @@ export class Versus {
 
   // ── 흐름 ────────────────────────────────────────────────
 
-  prepare({ seed, limit, startLevel }) {
+  // turnBased: 사람 선수만 중력 없이(턴제). strategy: Jev에게 말로 준 전략(빈 문자열이면 기본 플레이).
+  prepare({ seed, limit, startLevel, turnBased = false, strategy = '' }) {
     this.stop();
     this.seed = seed;
     this.limit = limit;
+    this.turnBased = turnBased;
+    this.policy = null;
     this.started = false;
     const run = {};
     this.run = run;
 
     for (const lane of this.lanes) {
-      lane.game = new Game({ startLevel, rng: seededRandom(seed), pieceLimit: limit });
+      const human = lane.id === 'human';
+      lane.game = new Game({ startLevel, rng: seededRandom(seed), pieceLimit: limit, noGravity: human && turnBased });
+      if (human) lane.node.querySelector('.lane-tag').textContent = turnBased ? '키보드 · 턴제(중력 없음)' : '키보드로 직접';
       lane.metrics = {
         holes: 0,
         peak: 0,
@@ -139,6 +146,7 @@ export class Versus {
         fallbacks: 0,
         confidenceSum: 0,
         agreements: 0,
+        rechecks: 0,
         inputTokens: 0,
         model: null,
       };
@@ -153,7 +161,12 @@ export class Versus {
       this.bindEvents(lane);
     }
 
-    const brains = { jev: new JevBrain(), heuristic: new HeuristicBrain() };
+    // 벤치마크로 고른 설정(README 참고): Jev는 위에서 떨어뜨리는 후보만 보고, 확신도가 낮으면 상위 후보를
+    // 다음 피스 정보와 함께 다시 묻는다. 휴리스틱은 비틀어 넣기까지 찾고 다음 피스까지 본다.
+    const brains = {
+      jev: new JevBrain({ gate: GATE_CONFIDENCE, lookahead: 'recheck', reach: 'drop' }),
+      heuristic: new HeuristicBrain({ lookahead: true }),
+    };
     for (const id of Object.keys(brains)) {
       const lane = this.byId[id];
       lane.driver = new BotDriver(lane.game, brains[id], {
@@ -165,8 +178,26 @@ export class Versus {
     }
 
     this.setJev({ state: 'checking' });
-    jevStatus().then((status) => {
-      if (this.run === run) this.setJev(status);
+    this.el.policy.hidden = !strategy;
+    this.el.policy.textContent = strategy ? `Jev가 전략을 읽는 중… “${strategy}”` : '';
+    // 연결을 확인하고, 전략이 있으면 Jev가 문장을 정책으로 바꾼 뒤에 Jev 레인을 시작한다.
+    jevStatus().then(async (status) => {
+      if (this.run !== run) return;
+      if (status.state === 'ready' && strategy) {
+        try {
+          const policy = await parseStrategy(strategy);
+          if (this.run !== run) return;
+          this.policy = policy;
+          brains.jev.requestOptions = { ...brains.jev.requestOptions, policy: policy.understood ? policy : null };
+          this.el.policy.textContent = `Jev 전략: ${policyLabel(policy)} — “${strategy}”`;
+        } catch (err) {
+          if (this.run !== run) return;
+          this.el.policy.textContent = `전략을 읽지 못해 기본대로 둬요 (${err.message})`;
+        }
+      } else if (strategy) {
+        this.el.policy.textContent = `Jev가 없어 전략은 쓰지 않아요 — “${strategy}”`;
+      }
+      this.setJev(status);
     });
     this.el.info.textContent = `시드 ${seed} · ${limit}피스 승부 · 시작 레벨 ${startLevel}`;
     return this.byId.human.game;
@@ -357,14 +388,19 @@ export class Versus {
     }
 
     if (decision.source === 'jev') {
-      m.jevCalls += 1;
+      m.jevCalls += decision.passes;
+      m.decisionsByJev = (m.decisionsByJev ?? 0) + 1;
       m.confidenceSum += decision.confidence;
+      if (decision.passes === 2) m.rechecks += 1;
       if (decision.agrees) m.agreements += 1;
       m.inputTokens += decision.usage?.input_tokens ?? 0;
       m.model = decision.model;
       // 상태 표시를 별칭(jev-latest) 대신 실제로 답한 모델 버전으로 바꾼다.
       if (decision.model && this.jev.model !== decision.model) this.setJev({ state: 'ready', model: decision.model });
-      el.meta.textContent = `${Math.round(decision.ms)}ms · 후보 ${decision.candidates}개`;
+      el.meta.textContent =
+        decision.passes === 2
+          ? `다시 물음: 확신 ${percent(decision.firstConfidence)} → ${percent(decision.confidence)} · ${Math.round(decision.ms)}ms`
+          : `${Math.round(decision.ms)}ms · 후보 ${decision.candidates}개`;
       this.setConfidence(lane, decision.confidence);
       this.renderAlternatives(lane, decision.alternatives, percent);
     } else {
@@ -374,9 +410,10 @@ export class Versus {
       el.alts.replaceChildren();
     }
     const cost = (m.inputTokens / 1e6) * JEV_PRICE_PER_MTOK;
-    const agree = m.jevCalls ? percent(m.agreements / m.jevCalls) : '—';
+    const judged = m.decisionsByJev ?? 0;
+    const agree = judged ? percent(m.agreements / judged) : '—';
     el.foot.textContent =
-      `호출 ${m.jevCalls}회 · 입력 ${formatNumber(m.inputTokens)}토큰 · $${cost.toFixed(4)} 추정 · 휴리스틱과 같은 수 ${agree}` +
+      `호출 ${m.jevCalls}회(다시 물음 ${m.rechecks}) · 입력 ${formatNumber(m.inputTokens)}토큰 · $${cost.toFixed(4)} 추정 · 휴리스틱과 같은 수 ${agree}` +
       (m.fallbacks ? ` · 대체 ${m.fallbacks}회` : '');
     el.json.textContent = JSON.stringify(decisionJson(decision), null, 2);
   }
@@ -443,7 +480,13 @@ export class Versus {
   renderResults() {
     const ranks = new Map(this.standings().map(({ lane, rank }) => [lane.id, rank]));
     const winner = this.lanes.find((lane) => ranks.get(lane.id) === 1);
-    this.el.sub.textContent = `모두 같은 ${this.limit}피스를 같은 순서(시드 ${this.seed})로 받았어요.${winner ? ` 1위는 ${winner.name}!` : ''}`;
+    const notes = [
+      this.turnBased ? '나는 턴제' : '',
+      this.policy?.understood ? `Jev 전략: ${policyLabel(this.policy)}` : '',
+    ].filter(Boolean);
+    this.el.sub.textContent =
+      `모두 같은 ${this.limit}피스를 같은 순서(시드 ${this.seed})로 받았어요.${notes.length ? ` (${notes.join(' · ')})` : ''}` +
+      `${winner ? ` 1위는 ${winner.name}!` : ''}`;
 
     const table = this.el.table;
     const head = document.createElement('tr');
@@ -510,6 +553,9 @@ function decisionJson(decision) {
     model: decision.model,
     ...base,
     confidence: decision.confidence,
+    passes: decision.passes,
+    firstChoice: decision.firstChoice,
+    firstConfidence: decision.firstConfidence,
     agreesWithHeuristic: decision.agrees,
     candidates: decision.candidates,
     latencyMs: Math.round(decision.ms),
@@ -542,13 +588,13 @@ const RESULT_ROWS = [
   {
     label: 'Jev 평균 확신도',
     only: 'jev',
-    value: (lane) => (lane.metrics.jevCalls ? lane.metrics.confidenceSum / lane.metrics.jevCalls : null),
+    value: (lane) => (lane.metrics.decisionsByJev ? lane.metrics.confidenceSum / lane.metrics.decisionsByJev : null),
     format: percent,
   },
   {
     label: '휴리스틱과 같은 수',
     only: 'jev',
-    value: (lane) => (lane.metrics.jevCalls ? lane.metrics.agreements / lane.metrics.jevCalls : null),
+    value: (lane) => (lane.metrics.decisionsByJev ? lane.metrics.agreements / lane.metrics.decisionsByJev : null),
     format: percent,
   },
   {
@@ -556,6 +602,7 @@ const RESULT_ROWS = [
     only: 'jev',
     value: (lane) => lane.metrics,
     format: (m) =>
-      `${m.jevCalls}회 · $${((m.inputTokens / 1e6) * JEV_PRICE_PER_MTOK).toFixed(4)}` + (m.fallbacks ? ` · 대체 ${m.fallbacks}회` : ''),
+      `${m.jevCalls}회(다시 물음 ${m.rechecks}) · $${((m.inputTokens / 1e6) * JEV_PRICE_PER_MTOK).toFixed(4)}` +
+      (m.fallbacks ? ` · 대체 ${m.fallbacks}회` : ''),
   },
 ];

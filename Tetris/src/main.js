@@ -35,6 +35,12 @@ let best = storage.get('best', 0);
 let hardDropping = false;
 let vsLimit = VERSUS_LIMITS.includes(storage.get('vs-limit', 50)) ? storage.get('vs-limit', 50) : 50;
 let resultTimer = 0;
+const vsStrategyInput = $('#vs-strategy');
+const vsTurnInput = $('#vs-turn');
+vsStrategyInput.value = storage.get('vs-strategy', '');
+vsTurnInput.checked = storage.get('vs-turn', false);
+vsStrategyInput.addEventListener('change', () => storage.set('vs-strategy', vsStrategyInput.value.trim()));
+vsTurnInput.addEventListener('change', () => storage.set('vs-turn', vsTurnInput.checked));
 
 function clampLevel(n) {
   return Math.min(MAX_START_LEVEL, Math.max(MIN_LEVEL, Number(n) || 1));
@@ -80,7 +86,9 @@ function startVersus(seed = randomSeed()) {
   setMode('versus');
   game = null;
   hud.reset();
-  input.attach(versus.prepare({ seed, limit: vsLimit, startLevel }));
+  const strategy = vsStrategyInput.value.trim();
+  storage.set('vs-strategy', strategy);
+  input.attach(versus.prepare({ seed, limit: vsLimit, startLevel, turnBased: vsTurnInput.checked, strategy }));
   countdown = READY_MS;
   goTimer = 0;
   resultTimer = 0;
@@ -225,6 +233,15 @@ const PAUSE_KEYS = new Set(['Escape', 'KeyP', 'F1']);
 
 window.addEventListener('keydown', (e) => {
   if (e.metaKey || e.altKey) return;
+  // 전략 입력칸·체크박스에서는 글자를 치거나 체크를 바꾸게 둔다. 입력칸에서 Enter는 대결 시작.
+  const field = e.target;
+  if (field instanceof HTMLInputElement && (field.type === 'text' || field.type === 'checkbox')) {
+    if (field.type === 'text' && e.code === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      startVersus();
+    }
+    return;
+  }
   const action = KEY_ACTIONS[e.code];
   if (e.code === 'KeyM') {
     if (!e.repeat) toggleSound();

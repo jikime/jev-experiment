@@ -8,7 +8,8 @@ import { boardStats, enumerateMoves } from '../src/core/placements.js';
 import { seededRandom } from '../src/core/random.js';
 import { HeuristicBrain, rankMoves } from '../src/ai/heuristic.js';
 import { JevBrain, QUESTION_ID, buildJevRequest, describeMove } from '../src/ai/jev.js';
-import { BotDriver } from '../src/ai/driver.js';
+import { BotDriver, applyAction } from '../src/ai/driver.js';
+import { policyFrom, policyLabel } from '../src/ai/strategy.js';
 
 const sorted = (cells) => cells.map(([x, y]) => `${x},${y}`).sort();
 
@@ -33,16 +34,11 @@ function replay(snapshot, move) {
   game.fillQueue();
   game.spawn(snapshot.type);
   let locked = null;
+  let clear = null;
   game.on('lock', (e) => (locked = e.cells));
-  for (const action of move.actions) {
-    if (action === 'hold') game.hold();
-    else if (action === 'cw') game.rotate(1);
-    else if (action === 'ccw') game.rotate(-1);
-    else if (action === 'left') game.move(-1);
-    else if (action === 'right') game.move(1);
-    else game.hardDrop();
-  }
-  return locked;
+  game.on('clear', (e) => (clear = e));
+  for (const action of move.actions) applyAction(game, action);
+  return { cells: locked, tspin: clear?.tspin ?? 'none', clear };
 }
 
 async function flush() {
@@ -58,7 +54,7 @@ test('착지 후보: 빈 보드에서 피스마다 서로 다른 자리 수가 �
   }
 });
 
-test('착지 후보: actions를 실제 엔진에 입력하면 정확히 그 칸에 고정된다 (월킥·홀드 포함)', () => {
+test('착지 후보: actions를 실제 엔진에 입력하면 정확히 그 칸에, 같은 T-스핀 판정으로 고정된다 (월킥·홀드·비틀어 넣기 포함)', () => {
   const rng = seededRandom(2024);
   let checked = 0;
   for (let round = 0; round < 12; round++) {
@@ -66,12 +62,31 @@ test('착지 후보: actions를 실제 엔진에 입력하면 정확히 그 칸�
     for (const type of PIECE_TYPES) {
       const snapshot = { grid, type, holdType: round % 2 ? 'I' : null, holdUsed: false, next: ['O', 'T', 'S'] };
       for (const move of enumerateMoves(snapshot)) {
-        assert.deepEqual(sorted(replay(snapshot, move)), sorted(move.cells), `${type} ${move.actions.join(',')}`);
+        const played = replay(snapshot, move);
+        assert.deepEqual(sorted(played.cells), sorted(move.cells), `${type} ${move.actions.join(',')}`);
+        assert.equal(played.tspin, move.features.tspin, `${type} ${move.actions.join(',')} T-스핀`);
         checked += 1;
       }
     }
   }
   assert.ok(checked > 2000, `검사한 후보 ${checked}개`);
+});
+
+test('착지 후보: 오버행 아래 T-스핀 더블 자리를 스스로 찾아내고, 그대로 두면 1200점이다', () => {
+  const grid = createGrid();
+  for (let x = 0; x < COLS; x++) if (x !== 4) grid[ROWS - 1][x] = 'Z';
+  for (let x = 0; x < COLS; x++) if (![3, 4, 5].includes(x)) grid[ROWS - 2][x] = 'Z';
+  grid[ROWS - 3][3] = 'Z'; // 왼쪽 오버행
+  grid[ROWS - 3][6] = 'Z';
+  const snapshot = { grid, type: 'T', holdType: null, holdUsed: true, next: [] };
+  const moves = enumerateMoves(snapshot);
+  const tsd = moves.find((m) => m.features.tspin === 'full' && m.features.lines === 2);
+  assert.ok(tsd, 'T-스핀 더블 후보가 있어야 한다');
+  assert.ok(tsd.actions.includes('down'), '한 칸씩 내려 오버행 밑으로 들어간다');
+  const played = replay(snapshot, tsd);
+  assert.deepEqual([played.clear.tspin, played.clear.lines, played.clear.points], ['full', 2, 1200]);
+  // 빠른 방식(드롭만)으로는 이 자리에 닿지 못한다.
+  assert.ok(!enumerateMoves(snapshot, { reach: 'drop' }).some((m) => m.features.tspin !== 'none'));
 });
 
 test('착지 후보: 줄 삭제·새 구멍 수를 계산한다', () => {
@@ -199,4 +214,41 @@ test('봇 운전: 휴리스틱 봇이 같은 시드로 100피스를 끝까지 �
   assert.equal(game.stats.pieces, 100);
   assert.equal(decisions, 100);
   assert.ok(game.lines >= 30, `지운 줄 ${game.lines}`);
+});
+
+// 실제 jev-1.13.0이 한국어 문장에 준 답(2026-09-26 녹화)으로 정책 변환을 확인한다. API는 부르지 않는다.
+test('전략: 한국어 문장에 대한 Jev 답을 정책으로 바꾼다 (반반인 값은 켜지 않는다)', () => {
+  const answers = (strategy, tetris, side, sideConf, risk, riskConf) => ({
+    is_strategy: { noul: strategy },
+    wants_tetris: { noul: tetris },
+    well_side: { choice: side, confidence: sideConf },
+    risk: { score: risk, confidence: riskConf },
+  });
+  const pick = ({ understood, tetris, well, risk }) => ({ understood, tetris, well, risk });
+  // "오른쪽 끝 한 줄을 비워 두고 테트리스를 노려" — 위험은 말하지 않았다(확신 0.34) → 균형
+  assert.deepEqual(pick(policyFrom(answers(0.93, 0.76, 'right', 0.98, 1.56, 0.34))), { understood: true, tetris: true, well: 'right', risk: 1 });
+  // "4줄 한 번에 지우는 걸 노려줘. 왼쪽 벽 쪽을 비워 둬"
+  assert.deepEqual(pick(policyFrom(answers(0.96, 0.91, 'left', 1, 1.35, 0.19))), { understood: true, tetris: true, well: 'left', risk: 1 });
+  // "안전하게, 최대한 낮게 쌓아"
+  assert.deepEqual(pick(policyFrom(answers(0.85, 0.11, 'none', 0.98, 0, 1))), { understood: true, tetris: false, well: null, risk: 0 });
+  // "과감하게 높이 쌓아서 크게 터뜨려" — 테트리스 여부가 정확히 반반 → 켜지 않는다
+  assert.deepEqual(pick(policyFrom(answers(0.82, 0.5, 'none', 0.98, 2, 1))), { understood: true, tetris: false, well: null, risk: 2 });
+  // "오늘 점심 뭐 먹지?"
+  assert.equal(policyFrom(answers(0, 0.01, 'none', 0.98, 0.29, 0.56)).understood, false);
+  assert.equal(policyLabel(policyFrom(answers(0.93, 0.76, 'right', 0.98, 1.56, 0.34))), '테트리스 노리기 · 오른쪽 끝 줄 비우기 · 균형 있게');
+});
+
+test('전략: 우물 쪽이 정해지면 모든 후보에 edge_column이 붙고, 우선순위에 우물 규칙이 들어간다', () => {
+  const snapshot = { grid: createGrid(), type: 'I', holdType: null, holdUsed: true, next: ['O'] };
+  const moves = enumerateMoves(snapshot, { reach: 'drop' });
+  const policy = { understood: true, tetris: true, well: 'right', risk: 1 };
+  const request = buildJevRequest(snapshot, moves, { policy });
+  const criteria = Object.values(request.questions[QUESTION_ID].criteria);
+  assert.ok(criteria.every((d) => typeof d.edge_column === 'string'));
+  const right = moves.find((m) => m.columns[1] === COLS - 1);
+  assert.match(describeMove(right, policy).edge_column, /puts blocks into the right edge column/);
+  assert.ok(request.questions[QUESTION_ID].instructions.priorities_in_order.some((p) => p.includes('right edge column empty')));
+  // 전략이 없으면 우물 규칙도 edge_column도 없다
+  const plain = buildJevRequest(snapshot, moves);
+  assert.ok(Object.values(plain.questions[QUESTION_ID].criteria).every((d) => !('edge_column' in d)));
 });

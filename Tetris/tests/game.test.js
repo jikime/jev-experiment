@@ -271,6 +271,22 @@ test('피스 제한: 정한 수만큼 두면 finished로 끝나고 다음 피스
   assert.equal(clearing.state, 'finished');
 });
 
+test('턴제(noGravity): 저절로 떨어지거나 고정되지 않고, 소프트 드롭으로 내려가고 하드 드롭으로 고정된다', () => {
+  const game = newGame({ noGravity: true });
+  game.start();
+  const startY = game.piece.y;
+  game.update(60_000);
+  assert.equal(game.piece.y, startY, '한참 지나도 그대로');
+  game.setSoftDrop(true);
+  game.update(5_000);
+  game.setSoftDrop(false);
+  assert.ok(game.isGrounded(), '소프트 드롭으로 바닥까지');
+  game.update(60_000);
+  assert.equal(game.stats.pieces, 0, '바닥에 닿아도 저절로 고정되지 않음');
+  game.hardDrop();
+  assert.equal(game.stats.pieces, 1);
+});
+
 test('레벨: 10줄마다 오르고, 중력은 가이드라인 공식을 따른다', () => {
   assert.equal(gravityInterval(1), 1000);
   assert.ok(Math.abs(gravityInterval(2) - 793) < 1);

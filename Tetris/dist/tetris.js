@@ -208,10 +208,12 @@ const T_CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
 // DOM에 의존하지 않는 게임 규칙 엔진. UI는 이벤트(on)와 공개 상태만 읽는다.
 class Game {
   // pieceLimit: 이 수만큼 피스를 고정하면 'finished'로 끝난다(대결 모드). 기본은 끝없음.
-  constructor({ startLevel = 1, rng = Math.random, pieceLimit = Infinity } = {}) {
+  // noGravity: 턴제. 피스가 저절로 떨어지거나 고정되지 않고, 소프트 드롭(↓)으로만 내려가며 하드 드롭으로만 고정된다.
+  constructor({ startLevel = 1, rng = Math.random, pieceLimit = Infinity, noGravity = false } = {}) {
     this.startLevel = Math.min(Math.max(1, Math.floor(startLevel)), 15);
     this.rng = rng;
     this.pieceLimit = pieceLimit;
+    this.noGravity = noGravity;
     this.listeners = new Map();
     this.reset();
   }
@@ -355,6 +357,13 @@ class Game {
     this.softDrop = on;
   }
 
+  // 한 칸 내리기(봇의 비틀어 넣기용). 소프트 드롭처럼 칸당 1점.
+  softDropStep() {
+    if (!this.canControl() || !this.stepDown()) return false;
+    this.score += 1;
+    return true;
+  }
+
   hardDrop() {
     if (!this.canControl()) return 0;
     const from = this.piece.y;
@@ -404,7 +413,7 @@ class Game {
     if (this.state !== 'playing') return;
     this.elapsed += dt;
 
-    if (!this.isGrounded()) {
+    if (!this.isGrounded() && (this.softDrop || !this.noGravity)) {
       const interval = this.softDrop ? this.gravity / SOFT_DROP_FACTOR : this.gravity;
       this.gravityAcc += dt;
       while (this.gravityAcc >= interval) {
@@ -415,6 +424,8 @@ class Game {
     }
 
     if (this.isGrounded()) {
+      if (this.noGravity) return; // 턴제: 하드 드롭으로만 고정
+
       this.gravityAcc = 0;
       const lock = this.lockState;
       lock.touched = true;
@@ -1357,23 +1368,40 @@ function boardStats(grid) {
   };
 }
 
-// 스폰 → 회전 → 좌우 이동 → 하드 드롭으로 닿는 모든 착지 후보.
-// 실제 Game 로직으로 시뮬레이션하므로 월킥까지 게임과 똑같이 맞는다.
+// 착지 후보 전부. 실제 Game 로직으로 시뮬레이션하므로 월킥·T-스핀 판정까지 게임과 똑같이 맞는다.
 // 홀드가 가능하면 "홀드한 뒤 나오는 피스"의 후보도 함께 낸다(actions가 'hold'로 시작).
-function enumerateMoves({ grid, type, holdType = null, holdUsed = false, next = [] }) {
+//   reach: 'full'(기본) — 스폰에서 좌우·회전·한 칸 내리기로 닿는 모든 상태를 넓이 우선으로 훑는다.
+//          턱 밑으로 밀어 넣기(tuck)·비틀어 넣기(T-스핀)까지 찾는다.
+//          'drop' — 회전 → 좌우 → 하드 드롭만. 훨씬 빨라서 한 수 앞 계산에 쓴다.
+function enumerateMoves({ grid, type, holdType = null, holdUsed = false, next = [] }, { reach = 'full' } = {}) {
   const before = boardStats(grid);
   const seen = new Set();
   const moves = [];
+  const explore = reach === 'drop' ? exploreDrops : exploreAll;
   explore(grid, type, [], false, before, seen, moves);
   const incoming = holdType ?? next[0];
   if (!holdUsed && incoming) explore(grid, incoming, ['hold'], true, before, seen, moves);
   return moves.map((move, i) => ({ id: `move_${i}`, ...move }));
 }
 
-function explore(grid, type, prefix, hold, before, seen, moves) {
+function makeSim(grid) {
   const sim = new Game();
   sim.grid = grid; // 아래 메서드들은 보드를 읽기만 한다.
   sim.state = 'playing';
+  return sim;
+}
+
+// 같은 칸이라도 T-스핀 여부가 다르면 다른 후보다(점수가 다르다).
+function addMove(grid, sim, piece, path, tspin, prefix, hold, before, seen, moves) {
+  const cells = sim.cellsOf(piece);
+  const key = `${cells.map(([x, y]) => `${x},${y}`).sort().join(' ')}|${tspin}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  moves.push(describe(grid, piece, cells, [...prefix, ...path, 'hard'], hold, before, tspin));
+}
+
+function exploreDrops(grid, type, prefix, hold, before, seen, moves) {
+  const sim = makeSim(grid);
   for (const rotation of ROTATIONS) {
     if (type === 'O' && rotation.length) continue;
     sim.spawn(type);
@@ -1390,24 +1418,68 @@ function explore(grid, type, prefix, hold, before, seen, moves) {
         positions.push({ piece: { ...sim.piece }, shifts: [...shifts] });
       }
     }
-
     for (const { piece, shifts } of positions) {
       sim.piece = { ...piece };
-      const landed = { ...piece, y: sim.ghostY() };
-      const cells = sim.cellsOf(landed);
-      const key = cells.map(([x, y]) => `${x},${y}`).sort().join(' ');
-      if (seen.has(key)) continue; // 회전만 다르고 같은 자리에 놓이는 후보는 하나로
-      seen.add(key);
-      moves.push(describe(grid, landed, cells, [...prefix, ...rotation, ...shifts, 'hard'], hold, before));
+      addMove(grid, sim, { ...piece, y: sim.ghostY() }, [...rotation, ...shifts], 'none', prefix, hold, before, seen, moves);
     }
   }
 }
 
-function describe(grid, piece, cells, actions, hold, before) {
+const STEPS = [
+  ['left', (sim) => sim.move(-1)],
+  ['right', (sim) => sim.move(1)],
+  ['down', (sim) => sim.stepDown()],
+  ['cw', (sim) => sim.rotate(1)],
+  ['ccw', (sim) => sim.rotate(-1)],
+];
+
+function exploreAll(grid, type, prefix, hold, before, seen, moves) {
+  const sim = makeSim(grid);
+  sim.spawn(type);
+  if (sim.state !== 'playing') return; // 스폰 자리가 막힘
+
+  // 상태 = 위치·회전 + "마지막 동작이 회전이었나"(T-스핀 판정이 달라진다). 먼저 닿은 경로가 가장 짧다.
+  const visited = new Set();
+  const queue = [];
+  const push = (piece, path, rotated, kick) => {
+    const key = `${piece.x},${piece.y},${piece.rot},${rotated ? 1 : 0}`;
+    if (visited.has(key)) return;
+    visited.add(key);
+    queue.push({ piece, path, rotated, kick });
+  };
+  push({ ...sim.piece }, [], false, -1);
+
+  for (let i = 0; i < queue.length; i++) {
+    const node = queue[i];
+    // 이 상태에서 하드 드롭한 자리. 바닥에 닿아 있고 마지막이 회전이면 드롭 거리가 0이라 T-스핀이 유지된다.
+    sim.piece = { ...node.piece };
+    const landedY = sim.ghostY();
+    const landed = { ...node.piece, y: landedY };
+    let tspin = 'none';
+    if (type === 'T' && node.rotated && landedY === node.piece.y) {
+      sim.piece = landed;
+      sim.lastAction = 'rotate';
+      sim.lastKick = node.kick;
+      tspin = sim.detectTSpin();
+    }
+    addMove(grid, sim, landed, node.path, tspin, prefix, hold, before, seen, moves);
+
+    for (const [action, step] of STEPS) {
+      const rotation = action === 'cw' || action === 'ccw';
+      if (type === 'O' && rotation) continue;
+      sim.piece = { ...node.piece };
+      if (!step(sim)) continue;
+      push({ ...sim.piece }, [...node.path, action], rotation, rotation ? sim.lastKick : -1);
+    }
+  }
+}
+
+function describe(grid, piece, cells, actions, hold, before, tspin = 'none') {
   const placed = grid.map((row) => row.slice());
   for (const [x, y] of cells) placed[y][x] = piece.type;
   const rows = fullRows(placed);
-  const after = boardStats(removeRows(placed, rows));
+  const result = removeRows(placed, rows);
+  const after = boardStats(result);
   const xs = cells.map(([x]) => x);
   const bottom = Math.max(...cells.map(([, y]) => y));
   return {
@@ -1417,9 +1489,11 @@ function describe(grid, piece, cells, actions, hold, before) {
     hold,
     actions,
     cells,
+    result, // 놓고 줄까지 지운 뒤의 보드(한 수 앞 내다보기용)
     columns: [Math.min(...xs), Math.max(...xs)],
     features: {
       lines: rows.length,
+      tspin, // 'none' | 'mini' | 'full' — 게임의 T-스핀 판정과 같다
       holes: after.holes,
       newHoles: after.holes - before.holes,
       aggregateHeight: after.aggregateHeight,
@@ -1448,8 +1522,14 @@ const ACTIONS = {
   ccw: (game) => game.rotate(-1),
   left: (game) => game.move(-1),
   right: (game) => game.move(1),
+  down: (game) => game.softDropStep(),
   hard: (game) => game.hardDrop(),
 };
+
+// 후보의 actions 한 칸을 게임에 입력한다(화면 봇·벤치마크·테스트 공용).
+function applyAction(game, action) {
+  return ACTIONS[action](game);
+}
 
 function snapshotOf(game) {
   return {
@@ -1505,12 +1585,12 @@ class BotDriver {
       const action = this.queue.shift();
       if (action === 'hard') {
         this.checkTarget();
-        ACTIONS.hard(game);
+        applyAction(game, 'hard');
         this.phase = 'settling';
         this.wait = this.settleMs;
         return;
       }
-      ACTIONS[action](game);
+      applyAction(game, action);
       if (game.state !== 'playing') break;
     }
     if (!this.queue.length) this.phase = 'idle';
@@ -1546,7 +1626,7 @@ class BotDriver {
     }
   }
 }
-return { snapshotOf, BotDriver };
+return { applyAction, snapshotOf, BotDriver };
 })();
 
 // ── src/ai/heuristic.js ──
@@ -1570,18 +1650,65 @@ function evaluate(features, weights = WEIGHTS) {
   );
 }
 
-// 점수가 높은 순. 같은 점수면 먼저 나온(홀드 안 하는, 덜 움직이는) 후보가 앞선다.
+// ── 한 수 앞 내다보기 ──────────────────────────────────
+
+// 이 수를 둔 다음에 나올 피스. 홀드를 쓰는 수면 큐가 한 칸 더 당겨진다.
+function nextPieceAfter(move, snapshot) {
+  if (!move.hold) return snapshot.next[0];
+  return snapshot.holdType ? snapshot.next[0] : snapshot.next[1];
+}
+
+// 후보마다 "다음 피스를 가장 잘 놓았을 때"를 찾아 follow로 붙인다.
+// follow.features: 다음 피스까지 놓은 뒤의 보드. follow.score: 두 수를 합친 평가(두 수의 지운 줄 합산).
+function attachFollowUps(snapshot, moves, weights = WEIGHTS) {
+  for (const move of moves) {
+    const type = nextPieceAfter(move, snapshot);
+    if (!type || move.features.lockOut) {
+      move.follow = null;
+      continue;
+    }
+    let best = null;
+    let bestScore = -Infinity;
+    // 다음 피스는 빠른 방식(회전 → 좌우 → 드롭)으로만 본다: 후보마다 한 번씩, 수십 번 돌기 때문.
+    for (const reply of enumerateMoves({ grid: move.result, type, holdUsed: true }, { reach: 'drop' })) {
+      const score = evaluate(reply.features, weights);
+      if (score > bestScore) {
+        best = reply;
+        bestScore = score;
+      }
+    }
+    move.follow = {
+      type,
+      features: best?.features ?? null,
+      score: bestScore + weights.lines * move.features.lines,
+    };
+  }
+  return moves;
+}
+
+// ── 순위 ───────────────────────────────────────────────
+
+const valueOf = (move, weights) => (move.follow ? move.follow.score : evaluate(move.features, weights));
+
+// 점수가 높은 순. 한 수 앞을 붙인 후보면 두 수를 합친 평가로, 같으면 지금 수의 평가로, 그래도 같으면
+// 먼저 나온(홀드 안 하는, 덜 움직이는) 후보가 앞선다.
 function rankMoves(moves, weights = WEIGHTS) {
   return moves
-    .map((move, order) => ({ move, score: evaluate(move.features, weights), order }))
-    .sort((a, b) => b.score - a.score || a.order - b.order);
+    .map((move, order) => ({ move, score: valueOf(move, weights), now: evaluate(move.features, weights), order }))
+    .sort((a, b) => b.score - a.score || b.now - a.now || a.order - b.order);
 }
 
 class HeuristicBrain {
+  // lookahead: 다음 피스까지 보고 고른다(2수 탐색).
+  constructor({ lookahead = false } = {}) {
+    this.lookahead = lookahead;
+  }
+
   decide(snapshot) {
     const started = performance.now();
     const moves = enumerateMoves(snapshot);
     if (moves.length === 0) return null;
+    if (this.lookahead) attachFollowUps(snapshot, moves);
     const ranked = rankMoves(moves);
     return {
       source: 'heuristic',
@@ -1593,14 +1720,14 @@ class HeuristicBrain {
     };
   }
 }
-return { WEIGHTS, evaluate, rankMoves, HeuristicBrain };
+return { WEIGHTS, evaluate, nextPieceAfter, attachFollowUps, rankMoves, HeuristicBrain };
 })();
 
 // ── src/ai/jev.js ──
 const __src_ai_jev_js = (() => {
 const { COLS, HIDDEN_ROWS } = __src_core_constants_js;
 const { enumerateMoves } = __src_core_placements_js;
-const { rankMoves } = __src_ai_heuristic_js;
+const { attachFollowUps, rankMoves } = __src_ai_heuristic_js;
 // 브라우저는 키 없이 개발 서버의 프록시(/api/jev)만 부른다. 키는 서버의 Tetris/.env에 있다.
 const JEV_ENDPOINT = '/api/jev';
 // 입력 100만 토큰당 가격(출력 토큰은 무료). docs.typesafe.ai/models 기준(2026-09). 화면에는 "추정"으로 표시.
@@ -1611,6 +1738,14 @@ const QUESTION_ID = 'best_move';
 // 문서 권장: 숫자 비교·계산은 코드가 하고, 모델에는 이름 붙은 구간으로 넘긴다(Jev 1.13 jaggedness).
 const LINES_TEXT = ['none', 'clears 1 line', 'clears 2 lines', 'clears 3 lines', 'clears 4 lines at once (a Tetris)'];
 const COUNT_WORDS = ['no', 'one', 'two'];
+
+// 줄을 지우는 T-스핀만 알린다. 줄 없는 T-스핀 미니는 점수가 작아, 굳이 노리게 만들 이유가 없다
+// (벤치마크에서 Jev가 줄 없는 미니를 노리다 스택을 흐트러뜨렸다).
+function linesText({ lines, tspin }) {
+  const base = LINES_TEXT[lines] ?? `clears ${lines} lines`;
+  if (!lines || !tspin || tspin === 'none') return base;
+  return `${base} with a ${tspin === 'full' ? 'T-spin (big bonus points)' : 'T-spin mini (small bonus points)'}`;
+}
 
 function positionText([from, to]) {
   const span = from === to ? `column ${from + 1}` : `columns ${from + 1}-${to + 1}`;
@@ -1654,21 +1789,60 @@ function surfaceChangeText(change) {
   return 'makes the surface much rougher';
 }
 
+// 한 수 앞: 코드가 찾은 "다음 피스를 가장 잘 놓았을 때"를 말로.
+function followText(follow) {
+  const piece = `the next ${follow.type} piece`;
+  const f = follow.features;
+  if (!f || f.lockOut) return `leaves no safe place for ${piece}`;
+  if (f.newHoles > 0) return `${piece} would then have to leave a hole`;
+  if (f.lines > 0) return `${piece} can then clear ${f.lines === 1 ? 'a line' : `${f.lines} lines`}`;
+  if (f.bumpinessChange > 1) return `${piece} fits without holes but roughens the surface`;
+  return `${piece} then fits cleanly`;
+}
+
 // 모든 후보가 같은 필드 이름을 쓰게 해서 모델이 나란히 비교할 수 있게 한다.
 // 회전 방향처럼 좋고 나쁨과 상관없는 정보는 넣지 않는다(무관한 정보는 정확도를 떨어뜨린다: jaggedness #5).
-function describeMove(move) {
+// move.follow가 붙어 있으면(한 수 앞 내다보기) next_piece 필드를, 전략에 우물 쪽이 있으면 edge_column 필드를 더한다.
+function describeMove(move, policy = null) {
   const f = move.features;
-  return {
+  const description = {
     uses_hold: move.hold ? `yes, holds the current piece and places the ${move.type} piece` : 'no',
     position: positionText(move.columns),
     lands_on: landingText(f),
-    lines_cleared: LINES_TEXT[f.lines] ?? `clears ${f.lines} lines`,
+    lines_cleared: linesText(f),
     new_holes: holesText(f.newHoles),
     stack_growth: growthText(f.heightGain),
     surface_change: surfaceChangeText(f.bumpinessChange),
     stack_height_after: heightText(f.maxHeight),
     risk: f.lockOut ? 'ends the game immediately' : f.maxHeight > 16 ? 'stack close to the top' : 'none',
   };
+  if (policy?.well) description.edge_column = edgeText(move, policy.well);
+  if (move.follow !== undefined) description.next_piece = move.follow ? followText(move.follow) : 'unknown';
+  return description;
+}
+
+function edgeText(move, side) {
+  const column = side === 'right' ? COLS - 1 : 0;
+  if (!move.cells.some(([x]) => x === column)) return `keeps the ${side} edge column empty`;
+  return move.features.lines
+    ? `puts blocks into the ${side} edge column and clears lines`
+    : `puts blocks into the ${side} edge column without clearing lines`;
+}
+
+// 우선순위. 전략(policy)이 없으면 기본 순서 그대로다.
+function priorities(policy, withFollow) {
+  const list = ['Never choose a move whose risk ends the game.', 'Avoid creating new holes (empty cells covered from above).'];
+  if (policy?.well) list.push(`Keep the ${policy.well} edge column empty as a well; only put blocks there with a move that clears lines.`);
+  if (policy?.tetris) list.push('Prefer clearing four lines at once (a Tetris) over clearing fewer lines.');
+  list.push(
+    policy?.risk === 2
+      ? 'A taller stack is acceptable for bigger clears, but keep it below the top.'
+      : 'Prefer moves that land in the lowest part of the board and do not raise the tallest column.',
+  );
+  list.push('Prefer moves that keep the surface flat.');
+  if (!policy?.tetris) list.push('Clear lines when possible; clearing several lines at once is best.');
+  if (withFollow) list.push('Prefer moves after which the next piece fits cleanly.');
+  return list;
 }
 
 function boardRows(grid) {
@@ -1678,7 +1852,9 @@ function boardRows(grid) {
 // 한 번의 요청: state = 보드와 피스 정보, 질문 = 후보 중 하나를 고르는 Choice 하나.
 // board: 보드 격자를 state에 넣을지. 기본은 뺀다 — 세 시드 50피스 비교에서 격자를 뺀 쪽이
 // 확신도가 높고(0.53→0.63) 토큰도 적었다. 판단은 코드가 계산한 후보 설명만으로 한다.
-function buildJevRequest(snapshot, moves, { board = false } = {}) {
+// recheck: 첫 판단이 애매해 좁힌 후보들로 다시 묻는 두 번째 질문.
+// policy: 플레이어 전략(strategy.js)에서 나온 정책. 없으면 기본 플레이.
+function buildJevRequest(snapshot, moves, { board = false, recheck = false, policy = null } = {}) {
   const state = {
     current_piece: snapshot.type,
     hold_piece: snapshot.holdType ?? 'empty',
@@ -1694,17 +1870,13 @@ function buildJevRequest(snapshot, moves, { board = false } = {}) {
       [QUESTION_ID]: {
         type: 'choice',
         instructions: {
-          question: 'Which placement is the best move for the current Tetris piece?',
+          question: recheck
+            ? 'These are the most promising placements for the current Tetris piece. Which one is the best move? Compare them closely.'
+            : 'Which placement is the best move for the current Tetris piece?',
           goal: 'Survive as long as possible and clear many lines.',
-          priorities_in_order: [
-            'Never choose a move whose risk ends the game.',
-            'Avoid creating new holes (empty cells covered from above).',
-            'Prefer moves that land in the lowest part of the board and do not raise the tallest column.',
-            'Prefer moves that keep the surface flat.',
-            'Clear lines when possible; clearing several lines at once is best.',
-          ],
+          priorities_in_order: priorities(policy, moves.some((move) => move.follow !== undefined)),
         },
-        criteria: Object.fromEntries(moves.map((move) => [move.id, describeMove(move)])),
+        criteria: Object.fromEntries(moves.map((move) => [move.id, describeMove(move, policy)])),
       },
     },
   };
@@ -1737,39 +1909,94 @@ async function askJev(request, { timeoutMs = 20_000 } = {}) {
   return { ...body, latencyMs: Math.round(performance.now() - started) };
 }
 
+// 확신도 게이트 기본값: 벤치마크(5시드 × 50피스)에서 확신도 0.4 미만 수의 20%가 피할 수 있던 구멍을
+// 만들었고, 0.8 이상은 2%였다. 그 아래일 때만 후보를 좁혀 다시 묻는다.
+const GATE_CONFIDENCE = 0.4;
+const SHORTLIST = 5;
+
+// 전략의 "우물(가장자리 한 줄)은 비워 둔다"는 규칙은 코드가 지킨다 — 판단이 아니라 규칙이라서다
+// (문서: 알려진 규칙은 코드에). Jev에게 우선순위로만 알려 줬더니 매 수 따로 판단하다 보니
+// 1~2줄을 지우려고 우물을 채워 버려 테트리스가 0번이었다(벤치마크).
+// 우물에 블록을 넣는 수는 테트리스 전략이면 4줄을, 아니면 줄을 지울 때만 허용한다.
+// 스택이 WELL_RELEASE_HEIGHT 이상으로 위험해지면 규칙을 풀어 살아남는 쪽을 택한다.
+const WELL_RELEASE_HEIGHT = 12;
+
+function allowedByPolicy(moves, policy) {
+  if (!policy?.well || moves.length === 0) return moves;
+  if (moves[0].features.highestColumn >= WELL_RELEASE_HEIGHT) return moves;
+  const column = policy.well === 'right' ? COLS - 1 : 0;
+  const need = policy.tetris ? 4 : 1;
+  const allowed = moves.filter((move) => !move.cells.some(([x]) => x === column) || move.features.lines >= need);
+  return allowed.length ? allowed : moves;
+}
+
+function readAnswer(res, byId) {
+  const answer = res.answers?.[QUESTION_ID];
+  const move = byId.get(answer?.choice);
+  if (!move) throw new Error('Jev 응답에 알 수 없는 후보가 있어요.');
+  return { move, confidence: answer.confidence, probabilities: answer.probabilities ?? {} };
+}
+
 // Jev가 후보 중 하나를 고른다. 실패하면 휴리스틱의 수로 대신 두고 'fallback'으로 표시한다.
+//   lookahead: false · 'all'(모든 후보에 다음 피스 정보) · 'recheck'(다시 물을 때만 다음 피스 정보)
+//   gate: 이 확신도 미만이면 Jev 자신의 상위 SHORTLIST개 후보로 좁혀 한 번 더 묻는다(null이면 안 함).
 class JevBrain {
-  constructor({ ask = askJev, requestOptions = {} } = {}) {
+  //   reach: 착지 후보를 찾는 방식('full' = 비틀어 넣기·T-스핀 포함, 'drop' = 위에서 떨어뜨리기만).
+  constructor({ ask = askJev, requestOptions = {}, lookahead = false, gate = null, shortlist = SHORTLIST, reach = 'full' } = {}) {
     this.ask = ask;
     this.requestOptions = requestOptions;
+    this.lookahead = lookahead;
+    this.gate = gate;
+    this.shortlist = shortlist;
+    this.reach = reach;
   }
 
   async decide(snapshot) {
-    const moves = enumerateMoves(snapshot);
+    const moves = allowedByPolicy(enumerateMoves(snapshot, { reach: this.reach }), this.requestOptions.policy);
     if (moves.length === 0) return null;
+    if (this.lookahead === 'all') attachFollowUps(snapshot, moves);
     const baseline = rankMoves(moves)[0].move;
     const byId = new Map(moves.map((move) => [move.id, move]));
     const started = performance.now();
     try {
       const res = await this.ask(buildJevRequest(snapshot, moves, this.requestOptions));
-      const answer = res.answers?.[QUESTION_ID];
-      const move = byId.get(answer?.choice);
-      if (!move) throw new Error('Jev 응답에 알 수 없는 후보가 있어요.');
-      const probabilities = answer.probabilities ?? {};
+      let pick = readAnswer(res, byId);
+      const first = pick;
+      const usage = { input_tokens: res.usage?.input_tokens ?? 0 };
+      let passes = 1;
+
+      if (this.gate !== null && pick.confidence < this.gate) {
+        const shortlist = Object.entries(pick.probabilities)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, this.shortlist)
+          .map(([id]) => byId.get(id))
+          .filter(Boolean);
+        if (shortlist.length > 1) {
+          if (this.lookahead === 'recheck') attachFollowUps(snapshot, shortlist);
+          const again = await this.ask(buildJevRequest(snapshot, shortlist, { ...this.requestOptions, recheck: true }));
+          pick = readAnswer(again, byId);
+          usage.input_tokens += again.usage?.input_tokens ?? 0;
+          passes = 2;
+        }
+      }
+
       return {
         source: 'jev',
-        move,
-        confidence: answer.confidence,
-        alternatives: Object.entries(probabilities)
+        move: pick.move,
+        confidence: pick.confidence,
+        firstConfidence: first.confidence,
+        firstChoice: first.move.id,
+        passes,
+        alternatives: Object.entries(pick.probabilities)
           .sort((a, b) => b[1] - a[1])
           .slice(0, 3)
           .filter(([id]) => byId.has(id))
           .map(([id, value]) => ({ move: byId.get(id), value })),
-        agrees: move.id === baseline.id,
+        agrees: pick.move.id === baseline.id,
         candidates: moves.length,
-        ms: res.latencyMs ?? performance.now() - started,
+        ms: performance.now() - started,
         model: res.model,
-        usage: res.usage,
+        usage,
         requestId: res.requestId,
       };
     } catch (err) {
@@ -1783,7 +2010,77 @@ class JevBrain {
     }
   }
 }
-return { JEV_ENDPOINT, JEV_PRICE_PER_MTOK, QUESTION_ID, describeMove, boardRows, buildJevRequest, jevStatus, askJev, JevBrain };
+return { JEV_ENDPOINT, JEV_PRICE_PER_MTOK, QUESTION_ID, describeMove, boardRows, buildJevRequest, jevStatus, askJev, GATE_CONFIDENCE, SHORTLIST, WELL_RELEASE_HEIGHT, allowedByPolicy, JevBrain };
+})();
+
+// ── src/ai/strategy.js ──
+const __src_ai_strategy_js = (() => {
+const { askJev } = __src_ai_jev_js;
+// 플레이어가 말로 적은 전략을 Jev가 정해진 값(정책)으로 바꾼다. 대결마다 한 번만 부른다.
+// 질문과 criteria는 영어로, 플레이어 문장은 그대로(한국어) state에 넣는다(문서: 영어가 주 학습 언어).
+const STRATEGY_QUESTIONS = {
+  is_strategy: {
+    type: 'noul',
+    instructions: 'Is `strategy` an instruction about how to play Tetris?',
+  },
+  wants_tetris: {
+    type: 'noul',
+    instructions: 'Does `strategy` ask to save up rows and clear four lines at once (a Tetris)?',
+  },
+  well_side: {
+    type: 'choice',
+    instructions: 'Which edge column does `strategy` want kept empty as a well?',
+    criteria: {
+      left: 'The leftmost column',
+      right: 'The rightmost column',
+      none: 'No column is mentioned or implied',
+    },
+  },
+  risk: {
+    type: 'score',
+    instructions: 'How much risk does `strategy` accept?',
+    criteria: [
+      'Play it safe: keep the stack as low as possible',
+      'Balanced: accept some height for better clears',
+      'Aggressive: accept a tall stack for bigger clears',
+    ],
+  },
+};
+
+// 경계값. 0.5 근처는 "반반"이라는 뜻이라(문서: Noul 0.5 = 불확실) 원하는 쪽으로 확실할 때만 켠다.
+// 한국어 문장 다섯 개로 확인: "크게 터뜨려"는 wants_tetris 0.50 → 켜지 않음, "테트리스를 노려"는 0.76 → 켬.
+const UNDERSTOOD = 0.5;
+const WANTS = 0.6;
+const SIDE_CONFIDENCE = 0.3;
+const RISK_CONFIDENCE = 0.5; // 위험을 말하지 않은 문장은 확신도가 낮게(0.2~0.3) 나온다 → 기본 '균형'
+
+// → { understood, tetris, well: 'left'|'right'|null, risk: 0|1|2, answers }
+function policyFrom(answers) {
+  const understood = answers.is_strategy.noul >= UNDERSTOOD;
+  if (!understood) return { understood, tetris: false, well: null, risk: 1, answers };
+  const tetris = answers.wants_tetris.noul >= WANTS;
+  const side = answers.well_side;
+  let well = side.choice !== 'none' && side.confidence >= SIDE_CONFIDENCE ? side.choice : null;
+  if (tetris && !well) well = 'right'; // 테트리스를 노리는데 쪽을 말하지 않았으면 흔한 오른쪽 우물
+  const risk = answers.risk.confidence >= RISK_CONFIDENCE ? Math.round(answers.risk.score) : 1;
+  return { understood, tetris, well, risk, answers };
+}
+
+async function parseStrategy(text, { ask = askJev } = {}) {
+  const res = await ask({ state: { strategy: text }, questions: STRATEGY_QUESTIONS });
+  return { text, ...policyFrom(res.answers), model: res.model, usage: res.usage };
+}
+
+// 화면 표시용 한 줄 요약.
+function policyLabel(policy) {
+  if (!policy.understood) return '전략으로 이해하지 못해 기본대로 둬요';
+  const parts = [];
+  if (policy.tetris) parts.push('테트리스 노리기');
+  if (policy.well) parts.push(`${policy.well === 'right' ? '오른쪽' : '왼쪽'} 끝 줄 비우기`);
+  parts.push(['안전하게', '균형 있게', '과감하게'][policy.risk] ?? '균형 있게');
+  return parts.join(' · ');
+}
+return { STRATEGY_QUESTIONS, policyFrom, parseStrategy, policyLabel };
 })();
 
 // ── src/versus.js ──
@@ -1793,7 +2090,8 @@ const { seededRandom } = __src_core_random_js;
 const { boardStats } = __src_core_placements_js;
 const { BotDriver } = __src_ai_driver_js;
 const { HeuristicBrain } = __src_ai_heuristic_js;
-const { JEV_PRICE_PER_MTOK, JevBrain, jevStatus } = __src_ai_jev_js;
+const { GATE_CONFIDENCE, JEV_PRICE_PER_MTOK, JevBrain, jevStatus } = __src_ai_jev_js;
+const { parseStrategy, policyLabel } = __src_ai_strategy_js;
 const { BoardRenderer, PreviewRenderer } = __src_ui_renderer_js;
 const { describeClear, formatNumber } = __src_ui_hud_js;
 // 대결 모드: 나 · Jev · 휴리스틱 봇이 같은 시드(같은 피스 순서)로 같은 피스 수를 둔다.
@@ -1815,8 +2113,8 @@ function settleMsFor(speed) {
 
 const LANES = [
   { id: 'human', name: '나', tag: '키보드로 직접' },
-  { id: 'jev', name: 'Jev', tag: 'TypeSafe System One' },
-  { id: 'heuristic', name: '휴리스틱', tag: '코드만 · El-Tetris 가중치' },
+  { id: 'jev', name: 'Jev', tag: 'TypeSafe · 애매하면 다시 묻기' },
+  { id: 'heuristic', name: '휴리스틱', tag: '코드만 · El-Tetris + 한 수 앞' },
 ];
 
 const ROTATION_KO = ['회전 없음', '시계 90°', '180°', '반시계 90°'];
@@ -1883,6 +2181,7 @@ class Versus {
     this.el = {
       info: $('#vs-info'),
       jev: $('#vs-jev'),
+      policy: $('#vs-policy'),
       speed: $('#vs-speed'),
       speedValue: $('#vs-speed-value'),
       countdown: $('#vs-countdown'),
@@ -1907,16 +2206,21 @@ class Versus {
 
   // ── 흐름 ────────────────────────────────────────────────
 
-  prepare({ seed, limit, startLevel }) {
+  // turnBased: 사람 선수만 중력 없이(턴제). strategy: Jev에게 말로 준 전략(빈 문자열이면 기본 플레이).
+  prepare({ seed, limit, startLevel, turnBased = false, strategy = '' }) {
     this.stop();
     this.seed = seed;
     this.limit = limit;
+    this.turnBased = turnBased;
+    this.policy = null;
     this.started = false;
     const run = {};
     this.run = run;
 
     for (const lane of this.lanes) {
-      lane.game = new Game({ startLevel, rng: seededRandom(seed), pieceLimit: limit });
+      const human = lane.id === 'human';
+      lane.game = new Game({ startLevel, rng: seededRandom(seed), pieceLimit: limit, noGravity: human && turnBased });
+      if (human) lane.node.querySelector('.lane-tag').textContent = turnBased ? '키보드 · 턴제(중력 없음)' : '키보드로 직접';
       lane.metrics = {
         holes: 0,
         peak: 0,
@@ -1928,6 +2232,7 @@ class Versus {
         fallbacks: 0,
         confidenceSum: 0,
         agreements: 0,
+        rechecks: 0,
         inputTokens: 0,
         model: null,
       };
@@ -1942,7 +2247,12 @@ class Versus {
       this.bindEvents(lane);
     }
 
-    const brains = { jev: new JevBrain(), heuristic: new HeuristicBrain() };
+    // 벤치마크로 고른 설정(README 참고): Jev는 위에서 떨어뜨리는 후보만 보고, 확신도가 낮으면 상위 후보를
+    // 다음 피스 정보와 함께 다시 묻는다. 휴리스틱은 비틀어 넣기까지 찾고 다음 피스까지 본다.
+    const brains = {
+      jev: new JevBrain({ gate: GATE_CONFIDENCE, lookahead: 'recheck', reach: 'drop' }),
+      heuristic: new HeuristicBrain({ lookahead: true }),
+    };
     for (const id of Object.keys(brains)) {
       const lane = this.byId[id];
       lane.driver = new BotDriver(lane.game, brains[id], {
@@ -1954,8 +2264,26 @@ class Versus {
     }
 
     this.setJev({ state: 'checking' });
-    jevStatus().then((status) => {
-      if (this.run === run) this.setJev(status);
+    this.el.policy.hidden = !strategy;
+    this.el.policy.textContent = strategy ? `Jev가 전략을 읽는 중… “${strategy}”` : '';
+    // 연결을 확인하고, 전략이 있으면 Jev가 문장을 정책으로 바꾼 뒤에 Jev 레인을 시작한다.
+    jevStatus().then(async (status) => {
+      if (this.run !== run) return;
+      if (status.state === 'ready' && strategy) {
+        try {
+          const policy = await parseStrategy(strategy);
+          if (this.run !== run) return;
+          this.policy = policy;
+          brains.jev.requestOptions = { ...brains.jev.requestOptions, policy: policy.understood ? policy : null };
+          this.el.policy.textContent = `Jev 전략: ${policyLabel(policy)} — “${strategy}”`;
+        } catch (err) {
+          if (this.run !== run) return;
+          this.el.policy.textContent = `전략을 읽지 못해 기본대로 둬요 (${err.message})`;
+        }
+      } else if (strategy) {
+        this.el.policy.textContent = `Jev가 없어 전략은 쓰지 않아요 — “${strategy}”`;
+      }
+      this.setJev(status);
     });
     this.el.info.textContent = `시드 ${seed} · ${limit}피스 승부 · 시작 레벨 ${startLevel}`;
     return this.byId.human.game;
@@ -2146,14 +2474,19 @@ class Versus {
     }
 
     if (decision.source === 'jev') {
-      m.jevCalls += 1;
+      m.jevCalls += decision.passes;
+      m.decisionsByJev = (m.decisionsByJev ?? 0) + 1;
       m.confidenceSum += decision.confidence;
+      if (decision.passes === 2) m.rechecks += 1;
       if (decision.agrees) m.agreements += 1;
       m.inputTokens += decision.usage?.input_tokens ?? 0;
       m.model = decision.model;
       // 상태 표시를 별칭(jev-latest) 대신 실제로 답한 모델 버전으로 바꾼다.
       if (decision.model && this.jev.model !== decision.model) this.setJev({ state: 'ready', model: decision.model });
-      el.meta.textContent = `${Math.round(decision.ms)}ms · 후보 ${decision.candidates}개`;
+      el.meta.textContent =
+        decision.passes === 2
+          ? `다시 물음: 확신 ${percent(decision.firstConfidence)} → ${percent(decision.confidence)} · ${Math.round(decision.ms)}ms`
+          : `${Math.round(decision.ms)}ms · 후보 ${decision.candidates}개`;
       this.setConfidence(lane, decision.confidence);
       this.renderAlternatives(lane, decision.alternatives, percent);
     } else {
@@ -2163,9 +2496,10 @@ class Versus {
       el.alts.replaceChildren();
     }
     const cost = (m.inputTokens / 1e6) * JEV_PRICE_PER_MTOK;
-    const agree = m.jevCalls ? percent(m.agreements / m.jevCalls) : '—';
+    const judged = m.decisionsByJev ?? 0;
+    const agree = judged ? percent(m.agreements / judged) : '—';
     el.foot.textContent =
-      `호출 ${m.jevCalls}회 · 입력 ${formatNumber(m.inputTokens)}토큰 · $${cost.toFixed(4)} 추정 · 휴리스틱과 같은 수 ${agree}` +
+      `호출 ${m.jevCalls}회(다시 물음 ${m.rechecks}) · 입력 ${formatNumber(m.inputTokens)}토큰 · $${cost.toFixed(4)} 추정 · 휴리스틱과 같은 수 ${agree}` +
       (m.fallbacks ? ` · 대체 ${m.fallbacks}회` : '');
     el.json.textContent = JSON.stringify(decisionJson(decision), null, 2);
   }
@@ -2232,7 +2566,13 @@ class Versus {
   renderResults() {
     const ranks = new Map(this.standings().map(({ lane, rank }) => [lane.id, rank]));
     const winner = this.lanes.find((lane) => ranks.get(lane.id) === 1);
-    this.el.sub.textContent = `모두 같은 ${this.limit}피스를 같은 순서(시드 ${this.seed})로 받았어요.${winner ? ` 1위는 ${winner.name}!` : ''}`;
+    const notes = [
+      this.turnBased ? '나는 턴제' : '',
+      this.policy?.understood ? `Jev 전략: ${policyLabel(this.policy)}` : '',
+    ].filter(Boolean);
+    this.el.sub.textContent =
+      `모두 같은 ${this.limit}피스를 같은 순서(시드 ${this.seed})로 받았어요.${notes.length ? ` (${notes.join(' · ')})` : ''}` +
+      `${winner ? ` 1위는 ${winner.name}!` : ''}`;
 
     const table = this.el.table;
     const head = document.createElement('tr');
@@ -2299,6 +2639,9 @@ function decisionJson(decision) {
     model: decision.model,
     ...base,
     confidence: decision.confidence,
+    passes: decision.passes,
+    firstChoice: decision.firstChoice,
+    firstConfidence: decision.firstConfidence,
     agreesWithHeuristic: decision.agrees,
     candidates: decision.candidates,
     latencyMs: Math.round(decision.ms),
@@ -2331,13 +2674,13 @@ const RESULT_ROWS = [
   {
     label: 'Jev 평균 확신도',
     only: 'jev',
-    value: (lane) => (lane.metrics.jevCalls ? lane.metrics.confidenceSum / lane.metrics.jevCalls : null),
+    value: (lane) => (lane.metrics.decisionsByJev ? lane.metrics.confidenceSum / lane.metrics.decisionsByJev : null),
     format: percent,
   },
   {
     label: '휴리스틱과 같은 수',
     only: 'jev',
-    value: (lane) => (lane.metrics.jevCalls ? lane.metrics.agreements / lane.metrics.jevCalls : null),
+    value: (lane) => (lane.metrics.decisionsByJev ? lane.metrics.agreements / lane.metrics.decisionsByJev : null),
     format: percent,
   },
   {
@@ -2345,7 +2688,8 @@ const RESULT_ROWS = [
     only: 'jev',
     value: (lane) => lane.metrics,
     format: (m) =>
-      `${m.jevCalls}회 · $${((m.inputTokens / 1e6) * JEV_PRICE_PER_MTOK).toFixed(4)}` + (m.fallbacks ? ` · 대체 ${m.fallbacks}회` : ''),
+      `${m.jevCalls}회(다시 물음 ${m.rechecks}) · $${((m.inputTokens / 1e6) * JEV_PRICE_PER_MTOK).toFixed(4)}` +
+      (m.fallbacks ? ` · 대체 ${m.fallbacks}회` : ''),
   },
 ];
 return { VERSUS_LIMITS, stepMsFor, Versus };
@@ -2389,6 +2733,12 @@ let best = storage.get('best', 0);
 let hardDropping = false;
 let vsLimit = VERSUS_LIMITS.includes(storage.get('vs-limit', 50)) ? storage.get('vs-limit', 50) : 50;
 let resultTimer = 0;
+const vsStrategyInput = $('#vs-strategy');
+const vsTurnInput = $('#vs-turn');
+vsStrategyInput.value = storage.get('vs-strategy', '');
+vsTurnInput.checked = storage.get('vs-turn', false);
+vsStrategyInput.addEventListener('change', () => storage.set('vs-strategy', vsStrategyInput.value.trim()));
+vsTurnInput.addEventListener('change', () => storage.set('vs-turn', vsTurnInput.checked));
 
 function clampLevel(n) {
   return Math.min(MAX_START_LEVEL, Math.max(MIN_LEVEL, Number(n) || 1));
@@ -2434,7 +2784,9 @@ function startVersus(seed = randomSeed()) {
   setMode('versus');
   game = null;
   hud.reset();
-  input.attach(versus.prepare({ seed, limit: vsLimit, startLevel }));
+  const strategy = vsStrategyInput.value.trim();
+  storage.set('vs-strategy', strategy);
+  input.attach(versus.prepare({ seed, limit: vsLimit, startLevel, turnBased: vsTurnInput.checked, strategy }));
   countdown = READY_MS;
   goTimer = 0;
   resultTimer = 0;
@@ -2579,6 +2931,15 @@ const PAUSE_KEYS = new Set(['Escape', 'KeyP', 'F1']);
 
 window.addEventListener('keydown', (e) => {
   if (e.metaKey || e.altKey) return;
+  // 전략 입력칸·체크박스에서는 글자를 치거나 체크를 바꾸게 둔다. 입력칸에서 Enter는 대결 시작.
+  const field = e.target;
+  if (field instanceof HTMLInputElement && (field.type === 'text' || field.type === 'checkbox')) {
+    if (field.type === 'text' && e.code === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      startVersus();
+    }
+    return;
+  }
   const action = KEY_ACTIONS[e.code];
   if (e.code === 'KeyM') {
     if (!e.repeat) toggleSound();

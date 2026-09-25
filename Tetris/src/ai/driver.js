@@ -6,8 +6,14 @@ const ACTIONS = {
   ccw: (game) => game.rotate(-1),
   left: (game) => game.move(-1),
   right: (game) => game.move(1),
+  down: (game) => game.softDropStep(),
   hard: (game) => game.hardDrop(),
 };
+
+// 후보의 actions 한 칸을 게임에 입력한다(화면 봇·벤치마크·테스트 공용).
+export function applyAction(game, action) {
+  return ACTIONS[action](game);
+}
 
 export function snapshotOf(game) {
   return {
@@ -63,12 +69,12 @@ export class BotDriver {
       const action = this.queue.shift();
       if (action === 'hard') {
         this.checkTarget();
-        ACTIONS.hard(game);
+        applyAction(game, 'hard');
         this.phase = 'settling';
         this.wait = this.settleMs;
         return;
       }
-      ACTIONS[action](game);
+      applyAction(game, action);
       if (game.state !== 'playing') break;
     }
     if (!this.queue.length) this.phase = 'idle';

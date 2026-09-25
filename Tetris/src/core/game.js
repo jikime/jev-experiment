@@ -21,10 +21,12 @@ const T_CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
 // DOM에 의존하지 않는 게임 규칙 엔진. UI는 이벤트(on)와 공개 상태만 읽는다.
 export class Game {
   // pieceLimit: 이 수만큼 피스를 고정하면 'finished'로 끝난다(대결 모드). 기본은 끝없음.
-  constructor({ startLevel = 1, rng = Math.random, pieceLimit = Infinity } = {}) {
+  // noGravity: 턴제. 피스가 저절로 떨어지거나 고정되지 않고, 소프트 드롭(↓)으로만 내려가며 하드 드롭으로만 고정된다.
+  constructor({ startLevel = 1, rng = Math.random, pieceLimit = Infinity, noGravity = false } = {}) {
     this.startLevel = Math.min(Math.max(1, Math.floor(startLevel)), 15);
     this.rng = rng;
     this.pieceLimit = pieceLimit;
+    this.noGravity = noGravity;
     this.listeners = new Map();
     this.reset();
   }
@@ -168,6 +170,13 @@ export class Game {
     this.softDrop = on;
   }
 
+  // 한 칸 내리기(봇의 비틀어 넣기용). 소프트 드롭처럼 칸당 1점.
+  softDropStep() {
+    if (!this.canControl() || !this.stepDown()) return false;
+    this.score += 1;
+    return true;
+  }
+
   hardDrop() {
     if (!this.canControl()) return 0;
     const from = this.piece.y;
@@ -217,7 +226,7 @@ export class Game {
     if (this.state !== 'playing') return;
     this.elapsed += dt;
 
-    if (!this.isGrounded()) {
+    if (!this.isGrounded() && (this.softDrop || !this.noGravity)) {
       const interval = this.softDrop ? this.gravity / SOFT_DROP_FACTOR : this.gravity;
       this.gravityAcc += dt;
       while (this.gravityAcc >= interval) {
@@ -228,6 +237,8 @@ export class Game {
     }
 
     if (this.isGrounded()) {
+      if (this.noGravity) return; // 턴제: 하드 드롭으로만 고정
+
       this.gravityAcc = 0;
       const lock = this.lockState;
       lock.touched = true;
