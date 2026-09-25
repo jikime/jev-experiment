@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { JEV_MODEL, ROOT, apiKey, callJev } from './jev-client.mjs';
 import { enumerateMoves } from '../src/core/placements.js';
 import { HeuristicBrain, rankMoves } from '../src/ai/heuristic.js';
-import { GATE_CONFIDENCE, JEV_PRICE_PER_MTOK, JevBrain } from '../src/ai/jev.js';
+import { GATE_CONFIDENCE, JEV_PRICE_PER_MTOK, JevBrain, JevPlusBrain } from '../src/ai/jev.js';
 import { playGame } from '../src/ai/simulate.js';
 
 const OUT_DIR = join(ROOT, 'bench-out');
@@ -23,7 +23,13 @@ const args = Object.fromEntries(
     return pairs;
   }, []),
 );
-const seeds = String(args.seeds ?? '4242,7,777').split(',').map(Number);
+// --seeds 4242,7,777 또는 범위 --seeds 101-112
+const seeds = String(args.seeds ?? '4242,7,777')
+  .split(',')
+  .flatMap((part) => {
+    const [from, to] = part.split('-').map(Number);
+    return Number.isFinite(to) ? Array.from({ length: to - from + 1 }, (_, i) => from + i) : [from];
+  });
 const pieces = Number(args.pieces ?? 50);
 const botNames = String(args.bots ?? 'heuristic,jev').split(',');
 const concurrency = Number(args.concurrency ?? 3);
@@ -76,6 +82,19 @@ const BOTS = {
   'jev-gate': { usesJev: true, make: () => new JevBrain({ ask, gate: GATE_CONFIDENCE }) },
   'jev-gate-look': { usesJev: true, make: () => new JevBrain({ ask, gate: GATE_CONFIDENCE, lookahead: 'recheck' }) },
   'jev-gate-look-drop': { usesJev: true, make: () => new JevBrain({ ask, gate: GATE_CONFIDENCE, lookahead: 'recheck', reach: 'drop' }) },
+  'jev-group': {
+    usesJev: true,
+    make: () => new JevBrain({ ask, gate: GATE_CONFIDENCE, lookahead: 'recheck', reach: 'drop', group: true }),
+  },
+  'jev-plus': { usesJev: true, make: () => new JevPlusBrain({ ask }) },
+  'jev-plus-tspin': {
+    usesJev: true,
+    make: () => new JevPlusBrain({ ask, requestOptions: { policy: { understood: true, tspin: true, risk: 1 } } }),
+  },
+  'jev-plus-tetris': {
+    usesJev: true,
+    make: () => new JevPlusBrain({ ask, requestOptions: { policy: { understood: true, tetris: true, well: 'right', risk: 1 } } }),
+  },
   // 플레이어가 "오른쪽 끝 한 줄을 비워 두고 테트리스를 노려"라고 말했을 때의 정책(strategy.js가 만드는 값)
   'jev-tetris': {
     usesJev: true,
@@ -208,6 +227,47 @@ for (const name of botNames) {
     console.log(
       `${`${lo.toFixed(1)}–${Math.min(hi, 1).toFixed(1)}`.padEnd(16)} ${String(bucket.length).padStart(4)} ${rate((d) => d.passes === 2).padStart(10)} ${rate((d) => d.rank === 1).padStart(18)} ${rate((d) => d.avoidableHole).padStart(18)}`,
     );
+  }
+}
+
+// 짝지은 비교: 같은 시드에서 (봇 − 첫 번째 봇)의 차이를 시드 단위로 재표집(부트스트랩)해 95% 신뢰구간을 낸다.
+// 구간이 0을 넘지 않으면(양쪽이 같은 부호) 우연이라 보기 어려운 차이로 표시한다(*).
+function bootstrapCI(diffs, rounds = 4000) {
+  let state = 12345; // 결과가 매번 같도록 고정 시드
+  const rand = () => ((state = (state * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const means = [];
+  for (let r = 0; r < rounds; r++) {
+    let sum = 0;
+    for (let i = 0; i < diffs.length; i++) sum += diffs[Math.floor(rand() * diffs.length)];
+    means.push(sum / diffs.length);
+  }
+  means.sort((a, b) => a - b);
+  return [means[Math.floor(rounds * 0.025)], means[Math.floor(rounds * 0.975)]];
+}
+
+const METRICS = [
+  ['지운 줄', (r) => r.lines],
+  ['점수', (r) => r.score],
+  ['남은 구멍', (r) => r.holes],
+  ['최고 높이', (r) => r.peak],
+  ['피할 수 있던 구멍', (r) => r.decisions.filter((d) => d.avoidableHole).length],
+];
+if (botNames.length > 1 && seeds.length > 2) {
+  const base = botNames[0];
+  console.log(`\n짝지은 비교 (${base} 대비, 시드 ${seeds.length}개, 95% 신뢰구간, * = 우연으로 보기 어려운 차이)`);
+  for (const name of botNames.slice(1)) {
+    const cells = METRICS.map(([metric, value]) => {
+      const diffs = seeds.map((seed) => {
+        const a = runs.find((r) => r.bot === base && r.seed === seed);
+        const b = runs.find((r) => r.bot === name && r.seed === seed);
+        return value(b) - value(a);
+      });
+      const [lo, hi] = bootstrapCI(diffs);
+      const sure = lo > 0 || hi < 0 ? '*' : ' ';
+      const fmt = (x) => (Math.abs(x) >= 100 ? Math.round(x).toString() : x.toFixed(1));
+      return `${metric} ${mean(diffs) >= 0 ? '+' : ''}${fmt(mean(diffs))} [${fmt(lo)}, ${fmt(hi)}]${sure}`;
+    });
+    console.log(`  ${name.padEnd(16)} ${cells.join('  ')}`);
   }
 }
 

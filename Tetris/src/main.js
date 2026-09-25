@@ -40,6 +40,22 @@ const vsTurnInput = $('#vs-turn');
 vsStrategyInput.value = storage.get('vs-strategy', '');
 vsTurnInput.checked = storage.get('vs-turn', false);
 vsStrategyInput.addEventListener('change', () => storage.set('vs-strategy', vsStrategyInput.value.trim()));
+const jevModeInputs = [...document.querySelectorAll('input[name="vs-jev-mode"]')];
+const savedJevMode = storage.get('vs-jev-mode', 'plus');
+for (const radio of jevModeInputs) {
+  radio.checked = radio.value === savedJevMode;
+  radio.addEventListener('change', () => storage.set('vs-jev-mode', radio.value));
+}
+const jevMode = () => jevModeInputs.find((radio) => radio.checked)?.value ?? 'plus';
+
+// 경기 중 전략 바꾸기: 보내고 나면 입력칸에서 빠져나와 키보드가 다시 게임을 조작하게 한다.
+const liveStrategy = $('#vs-strategy-live');
+$('#vs-live').addEventListener('submit', (e) => {
+  e.preventDefault();
+  versus.changeStrategy(liveStrategy.value.trim());
+  liveStrategy.value = '';
+  liveStrategy.blur();
+});
 vsTurnInput.addEventListener('change', () => storage.set('vs-turn', vsTurnInput.checked));
 
 function clampLevel(n) {
@@ -88,7 +104,7 @@ function startVersus(seed = randomSeed()) {
   hud.reset();
   const strategy = vsStrategyInput.value.trim();
   storage.set('vs-strategy', strategy);
-  input.attach(versus.prepare({ seed, limit: vsLimit, startLevel, turnBased: vsTurnInput.checked, strategy }));
+  input.attach(versus.prepare({ seed, limit: vsLimit, startLevel, turnBased: vsTurnInput.checked, strategy, jevMode: jevMode() }));
   countdown = READY_MS;
   goTimer = 0;
   resultTimer = 0;
@@ -233,10 +249,11 @@ const PAUSE_KEYS = new Set(['Escape', 'KeyP', 'F1']);
 
 window.addEventListener('keydown', (e) => {
   if (e.metaKey || e.altKey) return;
-  // 전략 입력칸·체크박스에서는 글자를 치거나 체크를 바꾸게 둔다. 입력칸에서 Enter는 대결 시작.
+  // 입력칸·체크박스·라디오에서는 글자를 치거나 선택을 바꾸게 둔다.
+  // 타이틀의 전략 칸에서 Enter는 대결 시작, 경기 중 전략 칸의 Enter는 폼 제출(전략 바꾸기).
   const field = e.target;
-  if (field instanceof HTMLInputElement && (field.type === 'text' || field.type === 'checkbox')) {
-    if (field.type === 'text' && e.code === 'Enter' && !e.isComposing) {
+  if (field instanceof HTMLInputElement && ['text', 'checkbox', 'radio'].includes(field.type)) {
+    if (field.id === 'vs-strategy' && e.code === 'Enter' && !e.isComposing) {
       e.preventDefault();
       startVersus();
     }

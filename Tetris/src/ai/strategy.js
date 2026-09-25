@@ -11,6 +11,14 @@ export const STRATEGY_QUESTIONS = {
     type: 'noul',
     instructions: 'Does `strategy` ask to save up rows and clear four lines at once (a Tetris)?',
   },
+  wants_tspin: {
+    type: 'noul',
+    instructions: 'Does `strategy` ask to perform T-spins (twisting a T piece into a slot)?',
+  },
+  wants_hold: {
+    type: 'noul',
+    instructions: 'Does `strategy` ask to use the hold slot, for example to save a piece for later?',
+  },
   well_side: {
     type: 'choice',
     instructions: 'Which edge column does `strategy` want kept empty as a well?',
@@ -38,16 +46,18 @@ const WANTS = 0.6;
 const SIDE_CONFIDENCE = 0.3;
 const RISK_CONFIDENCE = 0.5; // 위험을 말하지 않은 문장은 확신도가 낮게(0.2~0.3) 나온다 → 기본 '균형'
 
-// → { understood, tetris, well: 'left'|'right'|null, risk: 0|1|2, answers }
+// → { understood, tetris, tspin, hold, well: 'left'|'right'|null, risk: 0|1|2, answers }
 export function policyFrom(answers) {
   const understood = answers.is_strategy.noul >= UNDERSTOOD;
-  if (!understood) return { understood, tetris: false, well: null, risk: 1, answers };
+  if (!understood) return { understood, tetris: false, tspin: false, hold: false, well: null, risk: 1, answers };
   const tetris = answers.wants_tetris.noul >= WANTS;
+  const tspin = (answers.wants_tspin?.noul ?? 0) >= WANTS;
+  const hold = (answers.wants_hold?.noul ?? 0) >= WANTS;
   const side = answers.well_side;
   let well = side.choice !== 'none' && side.confidence >= SIDE_CONFIDENCE ? side.choice : null;
   if (tetris && !well) well = 'right'; // 테트리스를 노리는데 쪽을 말하지 않았으면 흔한 오른쪽 우물
   const risk = answers.risk.confidence >= RISK_CONFIDENCE ? Math.round(answers.risk.score) : 1;
-  return { understood, tetris, well, risk, answers };
+  return { understood, tetris, tspin, hold, well, risk, answers };
 }
 
 export async function parseStrategy(text, { ask = askJev } = {}) {
@@ -60,6 +70,8 @@ export function policyLabel(policy) {
   if (!policy.understood) return '전략으로 이해하지 못해 기본대로 둬요';
   const parts = [];
   if (policy.tetris) parts.push('테트리스 노리기');
+  if (policy.tspin) parts.push('T-스핀 노리기');
+  if (policy.hold) parts.push('홀드 적극 사용');
   if (policy.well) parts.push(`${policy.well === 'right' ? '오른쪽' : '왼쪽'} 끝 줄 비우기`);
   parts.push(['안전하게', '균형 있게', '과감하게'][policy.risk] ?? '균형 있게');
   return parts.join(' · ');

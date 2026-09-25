@@ -7,7 +7,7 @@ import { PIECE_TYPES } from '../src/core/pieces.js';
 import { boardStats, enumerateMoves } from '../src/core/placements.js';
 import { seededRandom } from '../src/core/random.js';
 import { HeuristicBrain, rankMoves } from '../src/ai/heuristic.js';
-import { JevBrain, QUESTION_ID, buildJevRequest, describeMove } from '../src/ai/jev.js';
+import { JevBrain, JevPlusBrain, QUESTION_ID, buildJevRequest, describeMove, groupByDescription } from '../src/ai/jev.js';
 import { BotDriver, applyAction } from '../src/ai/driver.js';
 import { policyFrom, policyLabel } from '../src/ai/strategy.js';
 
@@ -251,4 +251,58 @@ test('전략: 우물 쪽이 정해지면 모든 후보에 edge_column이 붙고,
   // 전략이 없으면 우물 규칙도 edge_column도 없다
   const plain = buildJevRequest(snapshot, moves);
   assert.ok(Object.values(plain.questions[QUESTION_ID].criteria).every((d) => !('edge_column' in d)));
+});
+
+test('후보 묶기: 위치를 뺀 설명이 같으면 한 선택지로 묶고, 대표는 묶음에서 휴리스틱 1등, 순서는 원래대로', () => {
+  const snapshot = { grid: createGrid(), type: 'O', holdType: null, holdUsed: true, next: ['T'] };
+  const moves = enumerateMoves(snapshot, { reach: 'drop' });
+  const ranked = rankMoves(moves);
+  const options = groupByDescription(moves, ranked);
+  assert.ok(options.length < moves.length, `${moves.length}개 → ${options.length}개`);
+  const key = (m) => JSON.stringify(describeMove(m, null, { position: false }));
+  assert.equal(new Set(options.map(key)).size, options.length, '선택지끼리는 설명이 모두 다르다');
+  for (const option of options) {
+    const bestInGroup = ranked.find(({ move }) => key(move) === key(option)).move;
+    assert.equal(option.id, bestInGroup.id);
+  }
+  const order = options.map((m) => moves.indexOf(m));
+  assert.deepEqual(order, [...order].sort((a, b) => a - b), '휴리스틱 순위가 순서로 새지 않는다');
+});
+
+test('Jev+: 휴리스틱 상위 5수 중 Jev가 고른 수를 두고, 확신이 낮으면 휴리스틱 1순위를 둔다', async () => {
+  const snapshot = { grid: createGrid(), type: 'T', holdType: null, holdUsed: true, next: ['I'] };
+  let asked = null;
+  const answer = (confidence) => async (request) => {
+    asked = request;
+    const ids = Object.keys(request.questions[QUESTION_ID].criteria);
+    return { model: 'jev-test', answers: { [QUESTION_ID]: { type: 'choice', choice: ids[2], confidence, probabilities: { [ids[2]]: 0.6, [ids[0]]: 0.4 } } }, usage: { input_tokens: 900 } };
+  };
+  const sure = await new JevPlusBrain({ ask: answer(0.5) }).decide(snapshot);
+  const options = Object.keys(asked.questions[QUESTION_ID].criteria);
+  assert.equal(options.length, 5, '선택지는 상위 5개');
+  assert.equal(sure.move.id, options[2]);
+  assert.equal(sure.deferred, false);
+  assert.ok(Object.values(asked.questions[QUESTION_ID].criteria).every((d) => 'next_piece' in d), '다음 피스 정보가 붙는다');
+  const unsure = await new JevPlusBrain({ ask: answer(0.1) }).decide(snapshot);
+  assert.equal(unsure.deferred, true);
+  assert.equal(unsure.jevChoice, options[2]);
+  assert.equal(unsure.move.id, options[0], '휴리스틱 1순위');
+});
+
+test('전략: T-스핀·홀드 요청도 정책으로 읽는다 (jev-1.13.0 녹화 답)', () => {
+  const answers = (tspin, hold, tetris, side, sideConf, risk, riskConf) => ({
+    is_strategy: { noul: 0.95 },
+    wants_tetris: { noul: tetris },
+    wants_tspin: { noul: tspin },
+    wants_hold: { noul: hold },
+    well_side: { choice: side, confidence: sideConf },
+    risk: { score: risk, confidence: riskConf },
+  });
+  // "T-스핀을 최대한 많이 해봐"
+  const tspin = policyFrom(answers(0.97, 0.04, 0.06, 'none', 0.99, 1.7, 0.55));
+  assert.deepEqual([tspin.tspin, tspin.hold, tspin.tetris, tspin.well], [true, false, false, null]);
+  // "I 블록은 홀드에 모아 뒀다가 오른쪽 우물에 넣어서 테트리스"
+  const hold = policyFrom(answers(0.03, 0.97, 0.78, 'right', 0.65, 1.48, 0.22));
+  assert.deepEqual([hold.tspin, hold.hold, hold.tetris, hold.well, hold.risk], [false, true, true, 'right', 1]);
+  assert.equal(policyLabel(hold), '테트리스 노리기 · 홀드 적극 사용 · 오른쪽 끝 줄 비우기 · 균형 있게');
 });

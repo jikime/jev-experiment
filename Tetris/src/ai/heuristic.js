@@ -1,4 +1,5 @@
 import { enumerateMoves } from '../core/placements.js';
+import { allowedByPolicy } from './policy.js';
 
 // El-Tetris(Yiyuan Lee)의 유전 알고리즘 가중치. 코드만으로 두는 기준선 봇.
 export const WEIGHTS = {
@@ -67,17 +68,19 @@ export function rankMoves(moves, weights = WEIGHTS) {
 }
 
 export class HeuristicBrain {
-  // lookahead: 다음 피스까지 보고 고른다(2수 탐색).
-  constructor({ lookahead = false } = {}) {
+  // lookahead: 다음 피스까지 보고 고른다(2수 탐색). policy: 전략 정책의 우물 규칙(policy.js).
+  constructor({ lookahead = false, policy = null, weights = WEIGHTS } = {}) {
     this.lookahead = lookahead;
+    this.policy = policy;
+    this.weights = weights;
   }
 
   decide(snapshot) {
     const started = performance.now();
-    const moves = enumerateMoves(snapshot);
+    const moves = allowedByPolicy(enumerateMoves(snapshot), this.policy);
     if (moves.length === 0) return null;
-    if (this.lookahead) attachFollowUps(snapshot, moves);
-    const ranked = rankMoves(moves);
+    if (this.lookahead) attachFollowUps(snapshot, moves, this.weights);
+    const ranked = rankMoves(moves, this.weights);
     return {
       source: 'heuristic',
       move: ranked[0].move,

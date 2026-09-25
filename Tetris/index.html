@@ -107,6 +107,10 @@
           </label>
           <p class="vs-jev" id="vs-jev" data-state="checking">Jev 연결 확인 중…</p>
           <p class="vs-policy" id="vs-policy" hidden></p>
+          <form class="vs-live" id="vs-live" autocomplete="off">
+            <input type="text" id="vs-strategy-live" maxlength="120" placeholder="경기 중에 Jev 전략 바꾸기 (예: 이제 안전하게 낮게 쌓아)" aria-label="Jev 전략 바꾸기" />
+            <button class="btn btn-small" type="submit">바꾸기</button>
+          </form>
         </div>
         <div class="vs-lanes" id="vs-lanes">
           <div class="countdown vs-countdown" id="vs-countdown" aria-live="assertive"></div>
@@ -190,6 +194,11 @@
                 </div>
                 <button class="btn btn-vs" id="btn-versus" type="button">대결 시작 <kbd>V</kbd></button>
               </div>
+              <fieldset class="vs-mode">
+                <legend>Jev 방식</legend>
+                <label><input type="radio" name="vs-jev-mode" value="plus" checked /> <b>Jev+</b> <small>휴리스틱이 고른 안전한 5수 중에서 선택 (추천)</small></label>
+                <label><input type="radio" name="vs-jev-mode" value="solo" /> <b>Jev 단독</b> <small>모든 후보에서 직접 선택</small></label>
+              </fieldset>
               <label class="vs-strategy">
                 <span>Jev에게 전략 말하기 <small>(선택 · 비워 두면 기본 플레이)</small></span>
                 <input type="text" id="vs-strategy" maxlength="120" autocomplete="off" placeholder="예: 오른쪽 끝 한 줄을 비워 두고 테트리스를 노려" />

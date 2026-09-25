@@ -1,6 +1,7 @@
 import { COLS, HIDDEN_ROWS } from '../core/constants.js';
 import { enumerateMoves } from '../core/placements.js';
 import { attachFollowUps, rankMoves } from './heuristic.js';
+import { allowedByPolicy } from './policy.js';
 
 // 브라우저는 키 없이 개발 서버의 프록시(/api/jev)만 부른다. 키는 서버의 Tetris/.env에 있다.
 export const JEV_ENDPOINT = '/api/jev';
@@ -77,11 +78,12 @@ function followText(follow) {
 // 모든 후보가 같은 필드 이름을 쓰게 해서 모델이 나란히 비교할 수 있게 한다.
 // 회전 방향처럼 좋고 나쁨과 상관없는 정보는 넣지 않는다(무관한 정보는 정확도를 떨어뜨린다: jaggedness #5).
 // move.follow가 붙어 있으면(한 수 앞 내다보기) next_piece 필드를, 전략에 우물 쪽이 있으면 edge_column 필드를 더한다.
-export function describeMove(move, policy = null) {
+// position: 몇 번째 열인지. 후보 묶기(group)에서는 빼서, 좋고 나쁨이 같은 자리를 하나로 묶는다.
+export function describeMove(move, policy = null, { position = true } = {}) {
   const f = move.features;
   const description = {
     uses_hold: move.hold ? `yes, holds the current piece and places the ${move.type} piece` : 'no',
-    position: positionText(move.columns),
+    ...(position ? { position: positionText(move.columns) } : {}),
     lands_on: landingText(f),
     lines_cleared: linesText(f),
     new_holes: holesText(f.newHoles),
@@ -108,6 +110,8 @@ function priorities(policy, withFollow) {
   const list = ['Never choose a move whose risk ends the game.', 'Avoid creating new holes (empty cells covered from above).'];
   if (policy?.well) list.push(`Keep the ${policy.well} edge column empty as a well; only put blocks there with a move that clears lines.`);
   if (policy?.tetris) list.push('Prefer clearing four lines at once (a Tetris) over clearing fewer lines.');
+  if (policy?.tspin) list.push('Prefer T-spins that clear lines; they earn big bonus points.');
+  if (policy?.hold) list.push('Use the hold slot when the current piece fits badly or should be saved for later.');
   list.push(
     policy?.risk === 2
       ? 'A taller stack is acceptable for bigger clears, but keep it below the top.'
@@ -128,7 +132,7 @@ export function boardRows(grid) {
 // 확신도가 높고(0.53→0.63) 토큰도 적었다. 판단은 코드가 계산한 후보 설명만으로 한다.
 // recheck: 첫 판단이 애매해 좁힌 후보들로 다시 묻는 두 번째 질문.
 // policy: 플레이어 전략(strategy.js)에서 나온 정책. 없으면 기본 플레이.
-export function buildJevRequest(snapshot, moves, { board = false, recheck = false, policy = null } = {}) {
+export function buildJevRequest(snapshot, moves, { board = false, recheck = false, policy = null, position = true } = {}) {
   const state = {
     current_piece: snapshot.type,
     hold_piece: snapshot.holdType ?? 'empty',
@@ -150,7 +154,7 @@ export function buildJevRequest(snapshot, moves, { board = false, recheck = fals
           goal: 'Survive as long as possible and clear many lines.',
           priorities_in_order: priorities(policy, moves.some((move) => move.follow !== undefined)),
         },
-        criteria: Object.fromEntries(moves.map((move) => [move.id, describeMove(move, policy)])),
+        criteria: Object.fromEntries(moves.map((move) => [move.id, describeMove(move, policy, { position })])),
       },
     },
   };
@@ -188,22 +192,6 @@ export async function askJev(request, { timeoutMs = 20_000 } = {}) {
 export const GATE_CONFIDENCE = 0.4;
 export const SHORTLIST = 5;
 
-// 전략의 "우물(가장자리 한 줄)은 비워 둔다"는 규칙은 코드가 지킨다 — 판단이 아니라 규칙이라서다
-// (문서: 알려진 규칙은 코드에). Jev에게 우선순위로만 알려 줬더니 매 수 따로 판단하다 보니
-// 1~2줄을 지우려고 우물을 채워 버려 테트리스가 0번이었다(벤치마크).
-// 우물에 블록을 넣는 수는 테트리스 전략이면 4줄을, 아니면 줄을 지울 때만 허용한다.
-// 스택이 WELL_RELEASE_HEIGHT 이상으로 위험해지면 규칙을 풀어 살아남는 쪽을 택한다.
-export const WELL_RELEASE_HEIGHT = 12;
-
-export function allowedByPolicy(moves, policy) {
-  if (!policy?.well || moves.length === 0) return moves;
-  if (moves[0].features.highestColumn >= WELL_RELEASE_HEIGHT) return moves;
-  const column = policy.well === 'right' ? COLS - 1 : 0;
-  const need = policy.tetris ? 4 : 1;
-  const allowed = moves.filter((move) => !move.cells.some(([x]) => x === column) || move.features.lines >= need);
-  return allowed.length ? allowed : moves;
-}
-
 function readAnswer(res, byId) {
   const answer = res.answers?.[QUESTION_ID];
   const move = byId.get(answer?.choice);
@@ -216,24 +204,31 @@ function readAnswer(res, byId) {
 //   gate: 이 확신도 미만이면 Jev 자신의 상위 SHORTLIST개 후보로 좁혀 한 번 더 묻는다(null이면 안 함).
 export class JevBrain {
   //   reach: 착지 후보를 찾는 방식('full' = 비틀어 넣기·T-스핀 포함, 'drop' = 위에서 떨어뜨리기만).
-  constructor({ ask = askJev, requestOptions = {}, lookahead = false, gate = null, shortlist = SHORTLIST, reach = 'full' } = {}) {
+  //   group: 설명이 똑같은 후보를 선택지 하나로 묶는다. 묶음 안의 구체적인 자리는 휴리스틱이 정한다.
+  constructor({ ask = askJev, requestOptions = {}, lookahead = false, gate = null, shortlist = SHORTLIST, reach = 'full', group = false } = {}) {
     this.ask = ask;
     this.requestOptions = requestOptions;
     this.lookahead = lookahead;
     this.gate = gate;
     this.shortlist = shortlist;
     this.reach = reach;
+    this.group = group;
   }
 
   async decide(snapshot) {
-    const moves = allowedByPolicy(enumerateMoves(snapshot, { reach: this.reach }), this.requestOptions.policy);
+    // T-스핀을 원하면 비틀어 넣는 자리까지 찾아야 후보에 T-스핀이 생긴다.
+    const reach = this.requestOptions.policy?.tspin ? 'full' : this.reach;
+    const moves = allowedByPolicy(enumerateMoves(snapshot, { reach }), this.requestOptions.policy);
     if (moves.length === 0) return null;
     if (this.lookahead === 'all') attachFollowUps(snapshot, moves);
-    const baseline = rankMoves(moves)[0].move;
+    const ranked = rankMoves(moves);
+    const baseline = ranked[0].move;
     const byId = new Map(moves.map((move) => [move.id, move]));
+    const options = this.group ? groupByDescription(moves, ranked, this.requestOptions.policy) : moves;
+    const requestOptions = this.group ? { ...this.requestOptions, position: false } : this.requestOptions;
     const started = performance.now();
     try {
-      const res = await this.ask(buildJevRequest(snapshot, moves, this.requestOptions));
+      const res = await this.ask(buildJevRequest(snapshot, options, requestOptions));
       let pick = readAnswer(res, byId);
       const first = pick;
       const usage = { input_tokens: res.usage?.input_tokens ?? 0 };
@@ -247,7 +242,7 @@ export class JevBrain {
           .filter(Boolean);
         if (shortlist.length > 1) {
           if (this.lookahead === 'recheck') attachFollowUps(snapshot, shortlist);
-          const again = await this.ask(buildJevRequest(snapshot, shortlist, { ...this.requestOptions, recheck: true }));
+          const again = await this.ask(buildJevRequest(snapshot, shortlist, { ...requestOptions, recheck: true }));
           pick = readAnswer(again, byId);
           usage.input_tokens += again.usage?.input_tokens ?? 0;
           passes = 2;
@@ -268,6 +263,7 @@ export class JevBrain {
           .map(([id, value]) => ({ move: byId.get(id), value })),
         agrees: pick.move.id === baseline.id,
         candidates: moves.length,
+        options: options.length,
         ms: performance.now() - started,
         model: res.model,
         usage,
@@ -281,6 +277,76 @@ export class JevBrain {
         candidates: moves.length,
         ms: performance.now() - started,
       };
+    }
+  }
+}
+
+// 설명이 똑같은 후보는 Jev가 구분할 수 없으니 선택지 하나로 묶는다. 대표는 묶음 안에서 휴리스틱 점수가 가장
+// 높은 후보(정확한 자리 계산은 코드 몫). 선택지 순서는 원래 나열 순서를 지켜 휴리스틱의 순위가 새지 않게 한다.
+export function groupByDescription(moves, ranked, policy = null) {
+  const representative = new Map(); // 설명 → 대표 후보
+  for (const { move } of ranked) {
+    const key = JSON.stringify(describeMove(move, policy, { position: false }));
+    if (!representative.has(key)) representative.set(key, move);
+  }
+  const chosen = new Set(representative.values());
+  return moves.filter((move) => chosen.has(move));
+}
+
+// Jev+: 휴리스틱(2수 탐색)이 안전한 상위 k개를 고르고, Jev는 그 안에서 플레이어 전략에 맞는 수를 고른다
+// (skill suggestion 쿡북의 "코드가 넓게 거르고, Jev가 좁게 판단"). 확신도가 gate보다 낮으면 휴리스틱 1순위를
+// 둔다(confidence-gated routing: 판단이 애매하면 코드에 맡긴다).
+// 선택지 5개에서 확신도 0.2는 1순위 확률 약 0.36 — 한 후보로 뚜렷하게 기울지 않은 경우다.
+export const PLUS_GATE = 0.2;
+
+export class JevPlusBrain {
+  constructor({ ask = askJev, requestOptions = {}, k = SHORTLIST, gate = PLUS_GATE } = {}) {
+    this.ask = ask;
+    this.requestOptions = requestOptions;
+    this.k = k;
+    this.gate = gate;
+  }
+
+  async decide(snapshot) {
+    const moves = allowedByPolicy(enumerateMoves(snapshot), this.requestOptions.policy);
+    if (moves.length === 0) return null;
+    attachFollowUps(snapshot, moves);
+    const top = rankMoves(moves)
+      .slice(0, this.k)
+      .map(({ move }) => move);
+    const baseline = top[0];
+    const started = performance.now();
+    if (top.length === 1) {
+      return { source: 'jev', move: baseline, confidence: 1, passes: 0, deferred: false, agrees: true, alternatives: [], candidates: moves.length, options: 1, ms: 0 };
+    }
+    const byId = new Map(top.map((move) => [move.id, move]));
+    try {
+      const res = await this.ask(buildJevRequest(snapshot, top, { ...this.requestOptions, recheck: true }));
+      const pick = readAnswer(res, byId);
+      const deferred = pick.confidence < this.gate;
+      const move = deferred ? baseline : pick.move;
+      return {
+        source: 'jev',
+        move,
+        jevChoice: pick.move.id,
+        deferred,
+        confidence: pick.confidence,
+        passes: 1,
+        alternatives: Object.entries(pick.probabilities)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .filter(([id]) => byId.has(id))
+          .map(([id, value]) => ({ move: byId.get(id), value })),
+        agrees: move.id === baseline.id,
+        candidates: moves.length,
+        options: top.length,
+        ms: performance.now() - started,
+        model: res.model,
+        usage: { input_tokens: res.usage?.input_tokens ?? 0 },
+        requestId: res.requestId,
+      };
+    } catch (err) {
+      return { source: 'fallback', move: baseline, error: err.message, candidates: moves.length, ms: performance.now() - started };
     }
   }
 }
