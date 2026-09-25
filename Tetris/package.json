@@ -1,0 +1,15 @@
+{
+  "name": "tetris-paper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tetris Guideline 룰 그대로, 페이퍼 네오브루탈 UI의 웹 테트리스",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

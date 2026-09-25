@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#efe8da" />
+    <title>테트리스 · Paper Edition</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 20'%3E%3Cpath d='M10 0h10v10h10v10H0V10h10z' fill='%239b6bd6' stroke='%2317150f' stroke-width='2'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..900&display=swap" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
+    <link rel="stylesheet" href="styles.css" />
+    <!-- file://로 더블클릭해도 돌도록 src/를 묶은 일반 스크립트를 쓴다 (npm run build). -->
+    <script src="dist/tetris.js" defer></script>
+  </head>
+  <body>
+    <div class="app" id="app" data-screen="title">
+      <header class="topbar">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 30 20" aria-hidden="true"><path d="M10 1h10v9h9v9H1v-9h9z" /></svg>
+          <span>TETRIS</span>
+          <small>Paper Edition</small>
+        </div>
+        <div class="top-actions">
+          <button class="icon-btn" id="btn-sound" type="button" aria-pressed="true" aria-label="효과음 켜기/끄기 (M)" title="효과음 (M)">
+            <svg class="icon-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" /><path d="M16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12" fill="none" /></svg>
+            <svg class="icon-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" /><path d="M17 9l5 6M22 9l-5 6" fill="none" /></svg>
+          </button>
+          <button class="icon-btn" id="btn-pause" type="button" aria-label="일시정지 (Esc)" title="일시정지 (Esc)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="stage">
+        <aside class="panel panel-left">
+          <section class="card hold-card" aria-label="홀드">
+            <h2>홀드 <kbd>C</kbd></h2>
+            <canvas id="hold" class="preview preview-hold"></canvas>
+          </section>
+
+          <section class="card stats-card" aria-label="기록">
+            <div class="stat stat-score">
+              <span class="label">점수</span>
+              <span class="value" id="score">0</span>
+            </div>
+            <div class="stat-pair">
+              <div class="stat">
+                <span class="label">레벨</span>
+                <span class="value" id="level">1</span>
+              </div>
+              <div class="stat">
+                <span class="label">라인</span>
+                <span class="value" id="lines">0</span>
+              </div>
+            </div>
+            <div class="level-meter">
+              <div class="meter-track"><div class="meter-fill" id="level-progress"></div></div>
+              <span class="meter-caption">다음 레벨까지 <b id="to-next">10</b>줄</span>
+            </div>
+            <div class="stat stat-time">
+              <span class="label">시간</span>
+              <span class="value" id="time">00:00.00</span>
+            </div>
+          </section>
+
+          <div class="badges">
+            <span class="badge badge-b2b" id="badge-b2b" title="다음 테트리스·T-스핀에 Back-to-Back ×1.5">B2B</span>
+            <span class="badge badge-combo" id="badge-combo">0 COMBO</span>
+          </div>
+          <div class="callouts" id="callouts" aria-live="polite"></div>
+        </aside>
+
+        <div class="board-wrap" id="board-wrap">
+          <canvas id="board" aria-label="게임 보드"></canvas>
+          <div class="countdown" id="countdown" aria-live="assertive"></div>
+        </div>
+
+        <aside class="panel panel-right">
+          <section class="card next-card" aria-label="다음 피스">
+            <h2>다음</h2>
+            <canvas id="next" class="preview preview-next"></canvas>
+          </section>
+          <section class="card keys-card" aria-label="조작법">
+            <h2>조작</h2>
+            <ul class="keys">
+              <li><span><kbd>←</kbd><kbd>→</kbd></span>이동</li>
+              <li><span><kbd>↑</kbd><kbd>X</kbd></span>회전</li>
+              <li><span><kbd>Z</kbd></span>반대 회전</li>
+              <li><span><kbd>↓</kbd></span>소프트 드롭</li>
+              <li><span><kbd class="wide">Space</kbd></span>하드 드롭</li>
+              <li><span><kbd>C</kbd></span>홀드</li>
+              <li><span><kbd>Esc</kbd></span>일시정지</li>
+            </ul>
+          </section>
+        </aside>
+      </main>
+
+      <div class="touch-pad" id="touch-pad" aria-label="터치 조작">
+        <button class="pad-btn pad-hold" type="button" data-action="hold">홀드</button>
+        <button class="pad-btn" type="button" data-action="ccw" aria-label="반대 회전"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4.5 4.5 8.5 9 12.5" /><path d="M5 8.5h8.5a6 6 0 1 1 0 12H9" /></svg></button>
+        <button class="pad-btn pad-cw" type="button" data-action="cw" aria-label="회전"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4.5l4.5 4-4.5 4" /><path d="M19 8.5h-8.5a6 6 0 1 0 0 12H15" /></svg></button>
+        <button class="pad-btn" type="button" data-action="left" aria-label="왼쪽">←</button>
+        <button class="pad-btn" type="button" data-action="soft" aria-label="소프트 드롭">↓</button>
+        <button class="pad-btn" type="button" data-action="right" aria-label="오른쪽">→</button>
+        <button class="pad-btn pad-drop" type="button" data-action="hard">DROP</button>
+      </div>
+
+      <section class="overlay overlay-title" id="screen-title" aria-label="시작 화면">
+        <div class="sheet title-sheet">
+          <div class="title-main">
+            <canvas id="title-art" class="title-art" aria-hidden="true"></canvas>
+            <h1 class="wordmark">TETRIS</h1>
+            <p class="tagline">공식 가이드라인 룰 그대로, 종이 위에 다시 찍은 테트리스.</p>
+            <div class="start-row">
+              <div class="level-picker" role="group" aria-label="시작 레벨">
+                <span class="picker-label">시작 레벨</span>
+                <button class="picker-btn" id="level-down" type="button" aria-label="레벨 내리기">−</button>
+                <output class="picker-value" id="start-level">01</output>
+                <button class="picker-btn" id="level-up" type="button" aria-label="레벨 올리기">+</button>
+              </div>
+              <button class="btn btn-primary" id="btn-start" type="button">게임 시작 <kbd>Enter</kbd></button>
+            </div>
+            <p class="best-line">최고 점수 <b id="title-best">0</b></p>
+          </div>
+          <div class="title-guide">
+            <h2>조작법</h2>
+            <ul class="keys keys-large">
+              <li><span><kbd>←</kbd><kbd>→</kbd></span>좌우 이동 (길게 누르면 연속)</li>
+              <li><span><kbd>↑</kbd><kbd>X</kbd></span>시계 방향 회전</li>
+              <li><span><kbd>Z</kbd><kbd>Ctrl</kbd></span>반시계 방향 회전</li>
+              <li><span><kbd>↓</kbd></span>소프트 드롭 (1점/칸)</li>
+              <li><span><kbd class="wide">Space</kbd></span>하드 드롭 (2점/칸)</li>
+              <li><span><kbd>C</kbd><kbd>Shift</kbd></span>홀드 (피스당 1회)</li>
+              <li><span><kbd>Esc</kbd><kbd>P</kbd></span>일시정지</li>
+              <li><span><kbd>M</kbd></span>효과음 켜기/끄기</li>
+            </ul>
+            <ul class="keys keys-large touch-guide">
+              <li><span><kbd>←</kbd><kbd>→</kbd></span>좌우 이동 (누르고 있으면 연속)</li>
+              <li><span><kbd>↓</kbd></span>소프트 드롭</li>
+              <li><span><kbd class="wide">DROP</kbd></span>하드 드롭</li>
+              <li><span><kbd>⟳</kbd><kbd>⟲</kbd></span>회전 / 반대 회전</li>
+              <li><span><kbd class="wide">홀드</kbd></span>피스 보관 (피스당 1회)</li>
+            </ul>
+            <p class="rules-note">SRS 회전·월킥 · 7-bag · 넥스트 5 · 고스트 · 락 딜레이 0.5초(15회 리셋) · T-스핀 · Back-to-Back · 콤보 · 퍼펙트 클리어 · 10줄마다 레벨 업</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="overlay" id="screen-pause" aria-label="일시정지">
+        <div class="sheet small-sheet">
+          <h2 class="sheet-title">일시정지</h2>
+          <p class="sheet-sub">보드는 가려 두었어요. 준비되면 이어서 하세요.</p>
+          <div class="sheet-actions">
+            <button class="btn btn-primary" id="btn-resume" type="button">계속하기 <kbd>Esc</kbd></button>
+            <button class="btn" id="btn-restart" type="button">처음부터</button>
+            <button class="btn btn-ghost" id="btn-quit" type="button">타이틀로</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="overlay overlay-over" id="screen-over" aria-label="게임 오버">
+        <div class="sheet over-sheet">
+          <div class="over-stamp">GAME OVER</div>
+          <p class="sheet-sub" id="over-reason"></p>
+          <div class="over-score">
+            <span class="label">최종 점수</span>
+            <span class="value" id="over-score">0</span>
+            <span class="new-best">NEW BEST</span>
+          </div>
+          <dl class="over-stats">
+            <div><dt>레벨</dt><dd id="over-level">1</dd></div>
+            <div><dt>라인</dt><dd id="over-lines">0</dd></div>
+            <div><dt>시간</dt><dd id="over-time">00:00.00</dd></div>
+            <div><dt>테트리스</dt><dd id="over-tetris">0</dd></div>
+            <div><dt>T-스핀</dt><dd id="over-tspin">0</dd></div>
+            <div><dt>최대 콤보</dt><dd id="over-combo">0</dd></div>
+            <div><dt>초당 피스</dt><dd id="over-pps">0.00</dd></div>
+            <div><dt>최고 점수</dt><dd id="over-best">0</dd></div>
+          </dl>
+          <div class="sheet-actions">
+            <button class="btn btn-primary" id="btn-again" type="button">다시 하기 <kbd>Enter</kbd></button>
+            <button class="btn btn-ghost" id="btn-home" type="button">타이틀로 <kbd>Esc</kbd></button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>
