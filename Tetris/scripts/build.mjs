@@ -10,7 +10,7 @@ const ENTRY = join(root, 'src/main.js');
 export const OUT = join(root, 'dist/tetris.js');
 
 const IMPORT_RE = /^import\s*\{([\s\S]*?)\}\s*from\s*'([^']+)';?[ \t]*\n/gm;
-const EXPORT_RE = /^export\s+(?:const|let|function|class)\s+([A-Za-z_$][\w$]*)/gm;
+const EXPORT_RE = /^export\s+(?:async\s+)?(?:const|let|function|class)\s+([A-Za-z_$][\w$]*)/gm;
 
 const moduleId = (file) => `__${relative(root, file).replace(/\W/g, '_')}`;
 
@@ -36,7 +36,7 @@ export async function bundle() {
   const parts = order.map((file) => {
     const { src, imports } = modules.get(file);
     const exported = [...src.matchAll(EXPORT_RE)].map(([, name]) => name);
-    const body = src.replace(IMPORT_RE, '').replace(/^export\s+(?=(?:const|let|function|class)\b)/gm, '');
+    const body = src.replace(IMPORT_RE, '').replace(/^export\s+(?=(?:async\s+)?(?:const|let|function|class)\b)/gm, '');
     if (/^\s*(?:import|export)\b/m.test(body)) {
       throw new Error(`${relative(root, file)}: 지원하지 않는 import/export 형식입니다 (이름 있는 import와 export 선언만 지원).`);
     }

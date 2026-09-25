@@ -249,6 +249,28 @@ test('게임 오버: 스폰 자리가 막히면 Block Out, 필드 위에서 고�
   assert.equal(locked.overReason, 'lockout');
 });
 
+test('피스 제한: 정한 수만큼 두면 finished로 끝나고 다음 피스를 내지 않는다', () => {
+  const game = newGame({ pieceLimit: 2 });
+  const done = collect(game, 'finished');
+  game.start();
+  game.hardDrop();
+  assert.equal(game.state, 'playing');
+  game.hardDrop();
+  assert.equal(game.state, 'finished');
+  assert.equal(game.piece, null);
+  assert.deepEqual(done, [{ pieces: 2 }]);
+
+  // 줄을 지운 마지막 피스도 삭제 연출이 끝난 뒤 finished가 된다.
+  const clearing = newGame({ pieceLimit: 1 });
+  clearing.start();
+  fillRow(clearing, 39, [0, 1, 2, 3]);
+  clearing.piece = { type: 'I', rot: 0, x: 0, y: 30 };
+  clearing.hardDrop();
+  assert.equal(clearing.state, 'clearing');
+  clearing.update(1000);
+  assert.equal(clearing.state, 'finished');
+});
+
 test('레벨: 10줄마다 오르고, 중력은 가이드라인 공식을 따른다', () => {
   assert.equal(gravityInterval(1), 1000);
   assert.ok(Math.abs(gravityInterval(2) - 793) < 1);

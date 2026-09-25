@@ -207,9 +207,11 @@ const T_CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
 
 // DOM에 의존하지 않는 게임 규칙 엔진. UI는 이벤트(on)와 공개 상태만 읽는다.
 class Game {
-  constructor({ startLevel = 1, rng = Math.random } = {}) {
+  // pieceLimit: 이 수만큼 피스를 고정하면 'finished'로 끝난다(대결 모드). 기본은 끝없음.
+  constructor({ startLevel = 1, rng = Math.random, pieceLimit = Infinity } = {}) {
     this.startLevel = Math.min(Math.max(1, Math.floor(startLevel)), 15);
     this.rng = rng;
+    this.pieceLimit = pieceLimit;
     this.listeners = new Map();
     this.reset();
   }
@@ -238,7 +240,7 @@ class Game {
     this.combo = -1;
     this.b2b = false;
     this.elapsed = 0;
-    this.state = 'ready'; // ready | playing | clearing | over
+    this.state = 'ready'; // ready | playing | clearing | over | finished
     this.overReason = null;
     this.softDrop = false;
     this.gravityAcc = 0;
@@ -471,7 +473,7 @@ class Game {
         this.stats.tspins += 1;
         this.emit('clear', { lines, tspin, b2b: false, combo: this.combo, perfectClear: false, points });
       }
-      this.spawn(this.takeNext());
+      this.advance();
       return;
     }
 
@@ -505,6 +507,16 @@ class Game {
   finishClear() {
     this.clearing = null;
     this.state = 'playing';
+    this.advance();
+  }
+
+  // 다음 피스를 내보내거나, 정해진 피스 수를 다 뒀으면 끝낸다.
+  advance() {
+    if (this.stats.pieces >= this.pieceLimit) {
+      this.state = 'finished';
+      this.emit('finished', { pieces: this.stats.pieces });
+      return;
+    }
     this.spawn(this.takeNext());
   }
 
@@ -523,6 +535,26 @@ class Game {
   }
 }
 return { Game };
+})();
+
+// ── src/core/random.js ──
+const __src_core_random_js = (() => {
+// 시드가 같으면 같은 수열을 내는 난수(mulberry32). 대결에서 모든 선수에게 같은 피스 순서를 준다.
+function seededRandom(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function randomSeed() {
+  return Math.floor(Math.random() * 1_000_000);
+}
+return { seededRandom, randomSeed };
 })();
 
 // ── src/ui/input.js ──
@@ -738,10 +770,12 @@ function drawPiece(ctx, type, cx, cy, s, palette, alpha = 1) {
 }
 
 class BoardRenderer {
-  constructor(canvas, container, palette) {
+  // syncWellTop: 옆 패널 정렬용 CSS 변수를 이 보드 기준으로 맞출지(대결 모드의 보드들은 끈다).
+  constructor(canvas, container, palette, { syncWellTop = true } = {}) {
     this.canvas = canvas;
     this.container = container;
     this.palette = palette;
+    this.syncWellTop = syncWellTop;
     this.ctx = null;
     this.resetFx();
     this.fit();
@@ -772,7 +806,7 @@ class BoardRenderer {
     this.canvas.style.height = `${this.h}px`;
     this.ctx = setBackingStore(this.canvas, this.w, this.h);
     // 옆 패널을 우물 상단선에 맞추도록 CSS에 알려 준다.
-    document.documentElement.style.setProperty('--well-top', `${this.oy - this.frame}px`);
+    if (this.syncWellTop) document.documentElement.style.setProperty('--well-top', `${this.oy - this.frame}px`);
   }
 
   colX(c) {
@@ -804,7 +838,8 @@ class BoardRenderer {
 
   // ── 그리기 ─────────────────────────────────────────────
 
-  draw(game, now) {
+  // target: 봇이 놓으려는 칸들. 주어지면 점선 윤곽으로 표시한다.
+  draw(game, now, target = null) {
     const { ctx } = this;
     if (!ctx) return;
     ctx.clearRect(0, 0, this.w, this.h);
@@ -817,6 +852,7 @@ class BoardRenderer {
       if (live) this.drawDropGuide(game);
       this.drawStack(grid, now);
       if (game.clearing) this.drawClearing(game.clearing);
+      if (live && target) this.drawTarget(target);
       if (live) this.drawGhost(game);
       if (game.piece) this.drawActive(game.piece, game.state === 'over');
       this.drawTrails(now);
@@ -945,6 +981,20 @@ class BoardRenderer {
     ctx.restore();
   }
 
+  drawTarget(cells) {
+    const { ctx, s, palette } = this;
+    const b = Math.max(2, s * 0.1);
+    ctx.save();
+    ctx.lineWidth = b;
+    ctx.strokeStyle = palette.accent;
+    ctx.setLineDash([s * 0.18, s * 0.12]);
+    for (const [x, y] of cells) {
+      if (y < HIDDEN_ROWS) continue;
+      ctx.strokeRect(this.colX(x) + b / 2, this.rowY(y) + b / 2, s - b, s - b);
+    }
+    ctx.restore();
+  }
+
   drawActive(piece, dimmed) {
     const { s, palette } = this;
     const blocks = SHAPES[piece.type][piece.rot]
@@ -1018,8 +1068,8 @@ class PreviewRenderer {
     drawPiece(ctx, game.holdType, w / 2, h / 2, s, this.palette, game.holdUsed ? 0.3 : 1);
   }
 
-  drawNext(game) {
-    const queue = game.nextQueue;
+  drawNext(game, count = Infinity) {
+    const queue = game.nextQueue.slice(0, count);
     const key = `${queue.join('')}|${this.w}x${this.h}`;
     if (!this.ctx || key === this.key) return;
     this.key = key;
@@ -1273,18 +1323,1049 @@ const storage = {
 return { storage };
 })();
 
+// ── src/core/placements.js ──
+const __src_core_placements_js = (() => {
+const { COLS, HIDDEN_ROWS, ROWS } = __src_core_constants_js;
+const { fullRows, removeRows } = __src_core_board_js;
+const { Game } = __src_core_game_js;
+// 스폰 직후 회전 순서. 세 번 돌리는 대신 반시계 한 번.
+const ROTATIONS = [[], ['cw'], ['cw', 'cw'], ['ccw']];
+
+// 보드 모양 지표. 높이는 숨김 줄까지 포함한 칸 수, 구멍은 위가 막힌 빈칸 수.
+function boardStats(grid) {
+  const heights = [];
+  let holes = 0;
+  for (let x = 0; x < COLS; x++) {
+    let top = ROWS;
+    for (let y = 0; y < ROWS; y++) {
+      if (grid[y][x] !== null) {
+        top = y;
+        break;
+      }
+    }
+    heights.push(ROWS - top);
+    for (let y = top + 1; y < ROWS; y++) if (grid[y][x] === null) holes += 1;
+  }
+  let bumpiness = 0;
+  for (let x = 0; x < COLS - 1; x++) bumpiness += Math.abs(heights[x] - heights[x + 1]);
+  return {
+    heights,
+    holes,
+    bumpiness,
+    aggregateHeight: heights.reduce((a, b) => a + b, 0),
+    maxHeight: Math.max(...heights),
+  };
+}
+
+// 스폰 → 회전 → 좌우 이동 → 하드 드롭으로 닿는 모든 착지 후보.
+// 실제 Game 로직으로 시뮬레이션하므로 월킥까지 게임과 똑같이 맞는다.
+// 홀드가 가능하면 "홀드한 뒤 나오는 피스"의 후보도 함께 낸다(actions가 'hold'로 시작).
+function enumerateMoves({ grid, type, holdType = null, holdUsed = false, next = [] }) {
+  const before = boardStats(grid);
+  const seen = new Set();
+  const moves = [];
+  explore(grid, type, [], false, before, seen, moves);
+  const incoming = holdType ?? next[0];
+  if (!holdUsed && incoming) explore(grid, incoming, ['hold'], true, before, seen, moves);
+  return moves.map((move, i) => ({ id: `move_${i}`, ...move }));
+}
+
+function explore(grid, type, prefix, hold, before, seen, moves) {
+  const sim = new Game();
+  sim.grid = grid; // 아래 메서드들은 보드를 읽기만 한다.
+  sim.state = 'playing';
+  for (const rotation of ROTATIONS) {
+    if (type === 'O' && rotation.length) continue;
+    sim.spawn(type);
+    if (sim.state !== 'playing') return; // 스폰 자리가 막힘
+    if (!rotation.every((dir) => sim.rotate(dir === 'cw' ? 1 : -1))) continue;
+
+    const base = { ...sim.piece };
+    const positions = [{ piece: base, shifts: [] }];
+    for (const [dx, key] of [[-1, 'left'], [1, 'right']]) {
+      sim.piece = { ...base };
+      const shifts = [];
+      while (sim.move(dx)) {
+        shifts.push(key);
+        positions.push({ piece: { ...sim.piece }, shifts: [...shifts] });
+      }
+    }
+
+    for (const { piece, shifts } of positions) {
+      sim.piece = { ...piece };
+      const landed = { ...piece, y: sim.ghostY() };
+      const cells = sim.cellsOf(landed);
+      const key = cells.map(([x, y]) => `${x},${y}`).sort().join(' ');
+      if (seen.has(key)) continue; // 회전만 다르고 같은 자리에 놓이는 후보는 하나로
+      seen.add(key);
+      moves.push(describe(grid, landed, cells, [...prefix, ...rotation, ...shifts, 'hard'], hold, before));
+    }
+  }
+}
+
+function describe(grid, piece, cells, actions, hold, before) {
+  const placed = grid.map((row) => row.slice());
+  for (const [x, y] of cells) placed[y][x] = piece.type;
+  const rows = fullRows(placed);
+  const after = boardStats(removeRows(placed, rows));
+  const xs = cells.map(([x]) => x);
+  const bottom = Math.max(...cells.map(([, y]) => y));
+  return {
+    type: piece.type,
+    rot: piece.rot,
+    x: piece.x,
+    hold,
+    actions,
+    cells,
+    columns: [Math.min(...xs), Math.max(...xs)],
+    features: {
+      lines: rows.length,
+      holes: after.holes,
+      newHoles: after.holes - before.holes,
+      aggregateHeight: after.aggregateHeight,
+      maxHeight: after.maxHeight,
+      bumpiness: after.bumpiness,
+      lockOut: cells.every(([, y]) => y < HIDDEN_ROWS),
+      // 놓기 전 보드와 비교한 값들: 피스 밑면 아래 칸 수(0이면 바닥), 가장 높은 열의 변화, 울퉁불퉁함의 변화.
+      landing: ROWS - 1 - bottom,
+      lowestColumn: Math.min(...before.heights),
+      highestColumn: before.maxHeight,
+      heightGain: after.maxHeight - before.maxHeight,
+      bumpinessChange: after.bumpiness - before.bumpiness,
+    },
+  };
+}
+return { boardStats, enumerateMoves };
+})();
+
+// ── src/ai/driver.js ──
+const __src_ai_driver_js = (() => {
+// 봇이 Game을 조작한다. 피스가 나오면 두뇌(brain)에게 묻고, 답을 기다리는 동안은 중력을 멈춘다.
+// 정해진 동작은 stepMs 간격으로 하나씩 실행해 사람이 따라 볼 수 있게 한다.
+const ACTIONS = {
+  hold: (game) => game.hold(),
+  cw: (game) => game.rotate(1),
+  ccw: (game) => game.rotate(-1),
+  left: (game) => game.move(-1),
+  right: (game) => game.move(1),
+  hard: (game) => game.hardDrop(),
+};
+
+function snapshotOf(game) {
+  return {
+    grid: game.grid.map((row) => row.slice()),
+    type: game.piece.type,
+    holdType: game.holdType,
+    holdUsed: game.holdUsed,
+    next: game.nextQueue.slice(),
+  };
+}
+
+class BotDriver {
+  // settleMs: 피스를 놓은 뒤 다음 수를 생각하기 전에 쉬는 시간(사람이 결과를 볼 수 있게).
+  constructor(game, brain, { stepMs = 60, settleMs = 0, onThink, onDecision } = {}) {
+    this.game = game;
+    this.brain = brain;
+    this.stepMs = stepMs;
+    this.settleMs = settleMs;
+    this.onThink = onThink;
+    this.onDecision = onDecision;
+    this.phase = 'idle'; // idle | thinking | acting | settling | stopped
+    this.queue = [];
+    this.acc = 0;
+    this.wait = 0;
+    this.token = 0;
+    this.decision = null;
+  }
+
+  stop() {
+    this.token += 1; // 아직 오는 중인 답은 버린다
+    this.phase = 'stopped';
+  }
+
+  update(dt) {
+    const game = this.game;
+    if (this.phase === 'stopped') return;
+    if (game.state === 'clearing') game.update(dt); // 줄 삭제 연출만 진행(중력은 없음)
+    if (this.phase === 'settling') {
+      this.wait -= dt;
+      if (this.wait > 0) return;
+      this.phase = 'idle';
+    }
+    if (game.state !== 'playing' || !game.piece) return;
+    if (this.phase === 'idle') {
+      this.think();
+      return;
+    }
+    if (this.phase !== 'acting') return;
+
+    this.acc += dt;
+    while (this.queue.length && this.acc >= this.stepMs) {
+      this.acc -= this.stepMs;
+      const action = this.queue.shift();
+      if (action === 'hard') {
+        this.checkTarget();
+        ACTIONS.hard(game);
+        this.phase = 'settling';
+        this.wait = this.settleMs;
+        return;
+      }
+      ACTIONS[action](game);
+      if (game.state !== 'playing') break;
+    }
+    if (!this.queue.length) this.phase = 'idle';
+  }
+
+  think() {
+    const token = ++this.token;
+    this.phase = 'thinking';
+    this.onThink?.();
+    const snapshot = snapshotOf(this.game);
+    Promise.resolve()
+      .then(() => this.brain.decide(snapshot))
+      .catch((err) => {
+        console.error(err);
+        return null;
+      })
+      .then((decision) => {
+        if (token !== this.token) return;
+        this.decision = decision;
+        this.queue = decision ? [...decision.move.actions] : ['hard'];
+        this.acc = this.stepMs; // 첫 동작은 바로
+        this.phase = 'acting';
+        this.onDecision?.(decision);
+      });
+  }
+
+  // 시뮬레이션과 실제 게임이 어긋나면 알린다(정상이라면 일어나지 않는다).
+  checkTarget() {
+    const move = this.decision?.move;
+    const piece = this.game.piece;
+    if (move && piece && (piece.type !== move.type || piece.rot !== move.rot || piece.x !== move.x)) {
+      console.warn('봇이 계획한 위치와 실제 피스 위치가 달라요', { move, piece });
+    }
+  }
+}
+return { snapshotOf, BotDriver };
+})();
+
+// ── src/ai/heuristic.js ──
+const __src_ai_heuristic_js = (() => {
+const { enumerateMoves } = __src_core_placements_js;
+// El-Tetris(Yiyuan Lee)의 유전 알고리즘 가중치. 코드만으로 두는 기준선 봇.
+const WEIGHTS = {
+  aggregateHeight: -0.510066,
+  lines: 0.760666,
+  holes: -0.35663,
+  bumpiness: -0.184483,
+};
+
+function evaluate(features, weights = WEIGHTS) {
+  if (features.lockOut) return -Infinity;
+  return (
+    weights.aggregateHeight * features.aggregateHeight +
+    weights.lines * features.lines +
+    weights.holes * features.holes +
+    weights.bumpiness * features.bumpiness
+  );
+}
+
+// 점수가 높은 순. 같은 점수면 먼저 나온(홀드 안 하는, 덜 움직이는) 후보가 앞선다.
+function rankMoves(moves, weights = WEIGHTS) {
+  return moves
+    .map((move, order) => ({ move, score: evaluate(move.features, weights), order }))
+    .sort((a, b) => b.score - a.score || a.order - b.order);
+}
+
+class HeuristicBrain {
+  decide(snapshot) {
+    const started = performance.now();
+    const moves = enumerateMoves(snapshot);
+    if (moves.length === 0) return null;
+    const ranked = rankMoves(moves);
+    return {
+      source: 'heuristic',
+      move: ranked[0].move,
+      score: ranked[0].score,
+      alternatives: ranked.slice(0, 3).map(({ move, score }) => ({ move, value: score })),
+      candidates: moves.length,
+      ms: performance.now() - started,
+    };
+  }
+}
+return { WEIGHTS, evaluate, rankMoves, HeuristicBrain };
+})();
+
+// ── src/ai/jev.js ──
+const __src_ai_jev_js = (() => {
+const { COLS, HIDDEN_ROWS } = __src_core_constants_js;
+const { enumerateMoves } = __src_core_placements_js;
+const { rankMoves } = __src_ai_heuristic_js;
+// 브라우저는 키 없이 개발 서버의 프록시(/api/jev)만 부른다. 키는 서버의 Tetris/.env에 있다.
+const JEV_ENDPOINT = '/api/jev';
+// 입력 100만 토큰당 가격(출력 토큰은 무료). docs.typesafe.ai/models 기준(2026-09). 화면에는 "추정"으로 표시.
+const JEV_PRICE_PER_MTOK = 0.042;
+const QUESTION_ID = 'best_move';
+
+// ── 후보 설명 ──────────────────────────────────────────
+// 문서 권장: 숫자 비교·계산은 코드가 하고, 모델에는 이름 붙은 구간으로 넘긴다(Jev 1.13 jaggedness).
+const LINES_TEXT = ['none', 'clears 1 line', 'clears 2 lines', 'clears 3 lines', 'clears 4 lines at once (a Tetris)'];
+const COUNT_WORDS = ['no', 'one', 'two'];
+
+function positionText([from, to]) {
+  const span = from === to ? `column ${from + 1}` : `columns ${from + 1}-${to + 1}`;
+  const wall = from === 0 ? ', against the left wall' : to === COLS - 1 ? ', against the right wall' : '';
+  return `${span} of 10${wall}`;
+}
+
+function holesText(n) {
+  if (n <= 0) return 'creates no new holes';
+  return n < COUNT_WORDS.length ? `creates ${COUNT_WORDS[n]} new hole${n > 1 ? 's' : ''}` : `creates ${n} new holes`;
+}
+
+function heightText(h) {
+  if (h <= 4) return 'very low';
+  if (h <= 8) return 'low';
+  if (h <= 12) return 'medium';
+  if (h <= 16) return 'high';
+  return 'near the top (dangerous)';
+}
+
+// 놓이는 높이를 지금 보드의 가장 낮은 열~가장 높은 열 사이에서 어디쯤인지로 말한다.
+function landingText({ landing, lowestColumn, highestColumn }) {
+  if (landing <= lowestColumn) return 'the lowest part of the board';
+  const t = (landing - lowestColumn) / Math.max(1, highestColumn - lowestColumn);
+  if (t < 0.4) return 'a low part of the board';
+  if (t < 0.8) return 'the middle height of the stack';
+  return 'on top of the highest part of the stack';
+}
+
+function growthText(gain) {
+  if (gain < 0) return 'lowers the stack';
+  if (gain === 0) return 'does not raise the tallest column';
+  if (gain <= 2) return `raises the tallest column by ${COUNT_WORDS[gain]} row${gain > 1 ? 's' : ''}`;
+  return 'raises the tallest column by three or more rows';
+}
+
+function surfaceChangeText(change) {
+  if (change < 0) return 'makes the surface flatter';
+  if (change <= 1) return 'keeps the surface about as flat';
+  if (change <= 3) return 'makes the surface a bit rougher';
+  return 'makes the surface much rougher';
+}
+
+// 모든 후보가 같은 필드 이름을 쓰게 해서 모델이 나란히 비교할 수 있게 한다.
+// 회전 방향처럼 좋고 나쁨과 상관없는 정보는 넣지 않는다(무관한 정보는 정확도를 떨어뜨린다: jaggedness #5).
+function describeMove(move) {
+  const f = move.features;
+  return {
+    uses_hold: move.hold ? `yes, holds the current piece and places the ${move.type} piece` : 'no',
+    position: positionText(move.columns),
+    lands_on: landingText(f),
+    lines_cleared: LINES_TEXT[f.lines] ?? `clears ${f.lines} lines`,
+    new_holes: holesText(f.newHoles),
+    stack_growth: growthText(f.heightGain),
+    surface_change: surfaceChangeText(f.bumpinessChange),
+    stack_height_after: heightText(f.maxHeight),
+    risk: f.lockOut ? 'ends the game immediately' : f.maxHeight > 16 ? 'stack close to the top' : 'none',
+  };
+}
+
+function boardRows(grid) {
+  return grid.slice(HIDDEN_ROWS).map((row) => row.map((cell) => (cell ? '#' : '.')).join(''));
+}
+
+// 한 번의 요청: state = 보드와 피스 정보, 질문 = 후보 중 하나를 고르는 Choice 하나.
+// board: 보드 격자를 state에 넣을지. 기본은 뺀다 — 세 시드 50피스 비교에서 격자를 뺀 쪽이
+// 확신도가 높고(0.53→0.63) 토큰도 적었다. 판단은 코드가 계산한 후보 설명만으로 한다.
+function buildJevRequest(snapshot, moves, { board = false } = {}) {
+  const state = {
+    current_piece: snapshot.type,
+    hold_piece: snapshot.holdType ?? 'empty',
+    next_pieces: snapshot.next.slice(0, 3),
+  };
+  if (board) {
+    state.board = boardRows(snapshot.grid);
+    state.board_legend = 'Rows from top to bottom. "#" is a filled cell, "." is empty. Columns are numbered 1-10 from the left.';
+  }
+  return {
+    state,
+    questions: {
+      [QUESTION_ID]: {
+        type: 'choice',
+        instructions: {
+          question: 'Which placement is the best move for the current Tetris piece?',
+          goal: 'Survive as long as possible and clear many lines.',
+          priorities_in_order: [
+            'Never choose a move whose risk ends the game.',
+            'Avoid creating new holes (empty cells covered from above).',
+            'Prefer moves that land in the lowest part of the board and do not raise the tallest column.',
+            'Prefer moves that keep the surface flat.',
+            'Clear lines when possible; clearing several lines at once is best.',
+          ],
+        },
+        criteria: Object.fromEntries(moves.map((move) => [move.id, describeMove(move)])),
+      },
+    },
+  };
+}
+
+// ── 서버 호출 ──────────────────────────────────────────
+
+// ready: 참가 가능 · nokey: 서버에 키가 없음 · offline: 개발 서버가 아님(file:// 등)
+async function jevStatus() {
+  try {
+    const res = await fetch(`${JEV_ENDPOINT}/status`, { cache: 'no-store' });
+    if (!res.ok) return { state: 'offline' };
+    const body = await res.json();
+    return body.configured ? { state: 'ready', model: body.model } : { state: 'nokey' };
+  } catch {
+    return { state: 'offline' };
+  }
+}
+
+async function askJev(request, { timeoutMs = 20_000 } = {}) {
+  const started = performance.now();
+  const res = await fetch(JEV_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+    signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return { ...body, latencyMs: Math.round(performance.now() - started) };
+}
+
+// Jev가 후보 중 하나를 고른다. 실패하면 휴리스틱의 수로 대신 두고 'fallback'으로 표시한다.
+class JevBrain {
+  constructor({ ask = askJev, requestOptions = {} } = {}) {
+    this.ask = ask;
+    this.requestOptions = requestOptions;
+  }
+
+  async decide(snapshot) {
+    const moves = enumerateMoves(snapshot);
+    if (moves.length === 0) return null;
+    const baseline = rankMoves(moves)[0].move;
+    const byId = new Map(moves.map((move) => [move.id, move]));
+    const started = performance.now();
+    try {
+      const res = await this.ask(buildJevRequest(snapshot, moves, this.requestOptions));
+      const answer = res.answers?.[QUESTION_ID];
+      const move = byId.get(answer?.choice);
+      if (!move) throw new Error('Jev 응답에 알 수 없는 후보가 있어요.');
+      const probabilities = answer.probabilities ?? {};
+      return {
+        source: 'jev',
+        move,
+        confidence: answer.confidence,
+        alternatives: Object.entries(probabilities)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 3)
+          .filter(([id]) => byId.has(id))
+          .map(([id, value]) => ({ move: byId.get(id), value })),
+        agrees: move.id === baseline.id,
+        candidates: moves.length,
+        ms: res.latencyMs ?? performance.now() - started,
+        model: res.model,
+        usage: res.usage,
+        requestId: res.requestId,
+      };
+    } catch (err) {
+      return {
+        source: 'fallback',
+        move: baseline,
+        error: err.message,
+        candidates: moves.length,
+        ms: performance.now() - started,
+      };
+    }
+  }
+}
+return { JEV_ENDPOINT, JEV_PRICE_PER_MTOK, QUESTION_ID, describeMove, boardRows, buildJevRequest, jevStatus, askJev, JevBrain };
+})();
+
+// ── src/versus.js ──
+const __src_versus_js = (() => {
+const { Game } = __src_core_game_js;
+const { seededRandom } = __src_core_random_js;
+const { boardStats } = __src_core_placements_js;
+const { BotDriver } = __src_ai_driver_js;
+const { HeuristicBrain } = __src_ai_heuristic_js;
+const { JEV_PRICE_PER_MTOK, JevBrain, jevStatus } = __src_ai_jev_js;
+const { BoardRenderer, PreviewRenderer } = __src_ui_renderer_js;
+const { describeClear, formatNumber } = __src_ui_hud_js;
+// 대결 모드: 나 · Jev · 휴리스틱 봇이 같은 시드(같은 피스 순서)로 같은 피스 수를 둔다.
+const VERSUS_LIMITS = [20, 30, 50, 100];
+const SPEED_MIN = 1;
+const SPEED_MAX = 10;
+const SPEED_DEFAULT = 3; // 동작 하나에 약 0.15초: 사람 눈으로 따라갈 수 있는 빠르기
+const SPEED_KEY = 'bot-speed';
+
+// 봇 속도 1~10 → 동작 하나 사이 간격(ms). 1은 0.4초, 10은 거의 즉시.
+function stepMsFor(speed) {
+  return Math.round(400 * Math.pow(0.62, speed - 1));
+}
+
+// 피스를 놓은 뒤 잠깐 멈춰 결과와 결정 카드를 볼 수 있게 한다.
+function settleMsFor(speed) {
+  return stepMsFor(speed) * 3;
+}
+
+const LANES = [
+  { id: 'human', name: '나', tag: '키보드로 직접' },
+  { id: 'jev', name: 'Jev', tag: 'TypeSafe System One' },
+  { id: 'heuristic', name: '휴리스틱', tag: '코드만 · El-Tetris 가중치' },
+];
+
+const ROTATION_KO = ['회전 없음', '시계 90°', '180°', '반시계 90°'];
+const ROTATION_DEG = [0, 90, 180, -90];
+
+const isDone = (game) => game.state === 'finished' || game.state === 'over';
+
+function moveLabel(move) {
+  const [from, to] = move.columns;
+  const cols = from === to ? `${from + 1}열` : `${from + 1}–${to + 1}열`;
+  const rotation = move.type === 'O' ? '회전 없음' : ROTATION_KO[move.rot];
+  return `${move.hold ? '홀드 → ' : ''}${move.type} · ${rotation} · ${cols}`;
+}
+
+function percent(value) {
+  return `${Math.round(value * 100)}%`;
+}
+
+function createLane(def, template, container, palette) {
+  const node = template.content.firstElementChild.cloneNode(true);
+  node.dataset.lane = def.id;
+  node.querySelector('.lane-name').textContent = def.name;
+  node.querySelector('.lane-tag').textContent = def.tag;
+  container.append(node);
+  const q = (sel) => node.querySelector(sel);
+  const stat = (name) => q(`[data-stat="${name}"]`);
+  return {
+    ...def,
+    node,
+    board: new BoardRenderer(q('.lane-canvas'), q('.lane-board'), palette, { syncWellTop: false }),
+    hold: new PreviewRenderer(q('.lane-hold'), palette),
+    next: new PreviewRenderer(q('.lane-next'), palette),
+    el: {
+      state: q('.lane-state'),
+      banner: q('.lane-banner'),
+      off: q('.lane-off'),
+      score: stat('score'),
+      lines: stat('lines'),
+      pieces: stat('pieces'),
+      holes: stat('holes'),
+      note: q('.decision-note'),
+      move: q('.decision-move'),
+      meta: q('.decision-meta'),
+      confFill: q('.conf-fill'),
+      confValue: q('.conf-value'),
+      alts: q('.decision-alts'),
+      foot: q('.decision-foot'),
+      json: q('.decision-json pre'),
+    },
+    cache: new Map(),
+    game: null,
+    driver: null,
+    metrics: null,
+    target: null,
+    disabled: false,
+  };
+}
+
+class Versus {
+  constructor({ root, palette, sfx, storage }) {
+    this.sfx = sfx;
+    this.storage = storage;
+    const $ = (sel) => root.querySelector(sel);
+    this.el = {
+      info: $('#vs-info'),
+      jev: $('#vs-jev'),
+      speed: $('#vs-speed'),
+      speedValue: $('#vs-speed-value'),
+      countdown: $('#vs-countdown'),
+      table: $('#vs-result-table'),
+      sub: $('#vs-result-sub'),
+    };
+    this.lanes = LANES.map((def) => createLane(def, $('#lane-template'), $('#vs-lanes'), palette));
+    this.byId = Object.fromEntries(this.lanes.map((lane) => [lane.id, lane]));
+    // 키와 동작이 줄바꿈으로 갈라지지 않게 항목 안은 줄바꿈 없는 공백으로 잇는다.
+    this.byId.human.el.note.textContent = ['← → 이동', '↑ X 회전', 'Z 반대 회전', '↓ 소프트 드롭', 'Space 하드 드롭', 'C 홀드']
+      .map((item) => item.replaceAll(' ', ' '))
+      .join(' · ');
+
+    this.seed = null;
+    this.limit = VERSUS_LIMITS[2];
+    this.started = false;
+    this.run = null;
+    this.jev = { state: 'checking' };
+    this.setSpeed(storage.get(SPEED_KEY, SPEED_DEFAULT));
+    this.el.speed.addEventListener('input', () => this.setSpeed(Number(this.el.speed.value)));
+  }
+
+  // ── 흐름 ────────────────────────────────────────────────
+
+  prepare({ seed, limit, startLevel }) {
+    this.stop();
+    this.seed = seed;
+    this.limit = limit;
+    this.started = false;
+    const run = {};
+    this.run = run;
+
+    for (const lane of this.lanes) {
+      lane.game = new Game({ startLevel, rng: seededRandom(seed), pieceLimit: limit });
+      lane.metrics = {
+        holes: 0,
+        peak: 0,
+        holesCreated: 0,
+        wallMs: 0,
+        decisions: 0,
+        thinkMs: 0,
+        jevCalls: 0,
+        fallbacks: 0,
+        confidenceSum: 0,
+        agreements: 0,
+        inputTokens: 0,
+        model: null,
+      };
+      lane.disabled = false;
+      lane.target = null;
+      lane.driver = null;
+      lane.cache.clear();
+      lane.board.resetFx();
+      lane.el.banner.className = 'lane-banner';
+      lane.el.off.hidden = true;
+      this.resetDecision(lane);
+      this.bindEvents(lane);
+    }
+
+    const brains = { jev: new JevBrain(), heuristic: new HeuristicBrain() };
+    for (const id of Object.keys(brains)) {
+      const lane = this.byId[id];
+      lane.driver = new BotDriver(lane.game, brains[id], {
+        stepMs: stepMsFor(this.speed),
+        settleMs: settleMsFor(this.speed),
+        onThink: () => this.onThink(lane),
+        onDecision: (decision) => this.onDecision(lane, decision),
+      });
+    }
+
+    this.setJev({ state: 'checking' });
+    jevStatus().then((status) => {
+      if (this.run === run) this.setJev(status);
+    });
+    this.el.info.textContent = `시드 ${seed} · ${limit}피스 승부 · 시작 레벨 ${startLevel}`;
+    return this.byId.human.game;
+  }
+
+  start() {
+    this.started = true;
+    for (const lane of this.lanes) {
+      if (lane.disabled) continue;
+      if (lane.id === 'jev' && this.jev.state !== 'ready') continue; // 연결 확인이 끝나면 시작
+      lane.game.start();
+    }
+  }
+
+  stop() {
+    this.run = null;
+    for (const lane of this.lanes) lane.driver?.stop();
+  }
+
+  update(dt) {
+    for (const lane of this.lanes) {
+      const game = lane.game;
+      if (lane.disabled || game.state === 'ready' || isDone(game)) continue;
+      lane.metrics.wallMs += dt;
+      if (lane.driver) lane.driver.update(dt);
+      else game.update(dt);
+    }
+  }
+
+  get done() {
+    return this.started && this.lanes.every((lane) => lane.disabled || isDone(lane.game));
+  }
+
+  setSpeed(value) {
+    this.speed = Math.min(SPEED_MAX, Math.max(SPEED_MIN, Math.round(Number(value) || SPEED_DEFAULT)));
+    this.storage.set(SPEED_KEY, this.speed);
+    this.el.speed.value = String(this.speed);
+    this.el.speedValue.textContent = String(this.speed);
+    for (const lane of this.lanes) {
+      if (!lane.driver) continue;
+      lane.driver.stepMs = stepMsFor(this.speed);
+      lane.driver.settleMs = settleMsFor(this.speed);
+    }
+  }
+
+  setJev(status) {
+    this.jev = status;
+    const text = {
+      checking: 'Jev 연결 확인 중…',
+      ready: `Jev 연결됨 · ${status.model}`,
+      nokey: 'Jev 꺼짐 · Tetris/.env에 TYPESAFE_API_KEY가 없어요',
+      offline: 'Jev 꺼짐 · npm start로 연 페이지에서만 참가해요',
+    }[status.state];
+    this.el.jev.textContent = text;
+    this.el.jev.dataset.state = status.state;
+    if (status.state === 'checking') return;
+
+    const lane = this.byId.jev;
+    if (status.state === 'ready') {
+      if (this.started && lane.game.state === 'ready') lane.game.start();
+      return;
+    }
+    lane.disabled = true;
+    lane.driver?.stop();
+    lane.el.off.hidden = false;
+    lane.el.off.textContent = text.replace('Jev 꺼짐 · ', '');
+  }
+
+  setCountdown(text) {
+    const el = this.el.countdown;
+    el.textContent = text;
+    el.classList.remove('is-pop');
+    if (text) {
+      void el.offsetWidth; // 애니메이션 재시작
+      el.classList.add('is-pop');
+    }
+  }
+
+  // ── 게임 이벤트 ─────────────────────────────────────────
+
+  bindEvents(lane) {
+    const game = lane.game;
+    const human = lane.id === 'human';
+    const sfx = this.sfx;
+    game
+      .on('spawn', () => this.measure(lane))
+      .on('harddrop', (e) => {
+        lane.board.addHardDrop(e, performance.now());
+        if (!human) return;
+        lane.hardDropping = true;
+        sfx.play('harddrop');
+      })
+      .on('lock', (e) => {
+        lane.board.addLock(e, performance.now());
+        lane.target = null;
+        if (human && !lane.hardDropping) sfx.play('lock');
+        lane.hardDropping = false;
+      })
+      .on('clear', (e) => {
+        this.banner(lane, describeClear(e));
+        if (human) sfx.play('clear', e);
+      })
+      .on('finished', () => {
+        this.measure(lane);
+        this.banner(lane, { title: '완주!', tags: [`${game.stats.pieces}피스`], tone: 'done' }, true);
+        if (human) sfx.play('levelup');
+      })
+      .on('gameover', () => {
+        this.measure(lane);
+        lane.target = null;
+        lane.board.markGameOver(performance.now());
+        this.banner(lane, { title: 'GAME OVER', tags: [`${game.stats.pieces}피스째`], tone: 'over' }, true);
+        if (human) sfx.play('gameover');
+      });
+    if (human) {
+      game
+        .on('move', () => sfx.play('move'))
+        .on('rotate', () => sfx.play('rotate'))
+        .on('hold', () => sfx.play('hold'))
+        .on('levelup', () => sfx.play('levelup'));
+    }
+  }
+
+  // 피스가 자리 잡을 때마다 보드 모양을 잰다.
+  measure(lane) {
+    const stats = boardStats(lane.game.grid);
+    const m = lane.metrics;
+    m.holesCreated += Math.max(0, stats.holes - m.holes);
+    m.holes = stats.holes;
+    m.peak = Math.max(m.peak, stats.maxHeight);
+  }
+
+  banner(lane, { title, tags = [], points, tone }, sticky = false) {
+    const el = lane.el.banner;
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    el.replaceChildren(heading);
+    const detail = [...tags, points ? `+${formatNumber(points)}` : ''].filter(Boolean).join(' · ');
+    if (detail) {
+      const span = document.createElement('span');
+      span.textContent = detail;
+      el.append(span);
+    }
+    el.className = `lane-banner tone-${tone}`;
+    void el.offsetWidth;
+    el.classList.add(sticky ? 'is-sticky' : 'is-on');
+  }
+
+  // ── 봇 결정 카드 ────────────────────────────────────────
+
+  resetDecision(lane) {
+    const el = lane.el;
+    el.move.textContent = lane.id === 'human' ? '' : '—';
+    el.meta.textContent = '';
+    el.alts.replaceChildren();
+    el.foot.textContent = lane.id === 'jev' ? '피스마다 후보 전체를 Choice 질문 하나로 물어요.' : '';
+    el.json.textContent = '아직 결정이 없어요.';
+    this.setConfidence(lane, null);
+  }
+
+  setConfidence(lane, value) {
+    lane.el.confFill.style.transform = `scaleX(${value ?? 0})`;
+    lane.el.confValue.textContent = value === null ? '—' : percent(value);
+  }
+
+  onThink(lane) {
+    lane.target = null;
+    if (lane.id === 'jev') lane.el.meta.textContent = '생각 중…';
+  }
+
+  onDecision(lane, decision) {
+    const el = lane.el;
+    const m = lane.metrics;
+    if (!decision) {
+      el.move.textContent = '둘 곳이 없어요';
+      return;
+    }
+    lane.target = decision.move.cells;
+    m.decisions += 1;
+    m.thinkMs += decision.ms;
+    el.move.textContent = moveLabel(decision.move);
+
+    if (lane.id === 'heuristic') {
+      el.meta.textContent = `평가 ${decision.score.toFixed(2)} · ${decision.ms.toFixed(1)}ms`;
+      this.renderAlternatives(lane, decision.alternatives, (v) => v.toFixed(2));
+      el.foot.textContent = `후보 ${decision.candidates}개 중 평가 점수가 가장 높은 수 · ${m.decisions}번째 결정`;
+      return;
+    }
+
+    if (decision.source === 'jev') {
+      m.jevCalls += 1;
+      m.confidenceSum += decision.confidence;
+      if (decision.agrees) m.agreements += 1;
+      m.inputTokens += decision.usage?.input_tokens ?? 0;
+      m.model = decision.model;
+      // 상태 표시를 별칭(jev-latest) 대신 실제로 답한 모델 버전으로 바꾼다.
+      if (decision.model && this.jev.model !== decision.model) this.setJev({ state: 'ready', model: decision.model });
+      el.meta.textContent = `${Math.round(decision.ms)}ms · 후보 ${decision.candidates}개`;
+      this.setConfidence(lane, decision.confidence);
+      this.renderAlternatives(lane, decision.alternatives, percent);
+    } else {
+      m.fallbacks += 1;
+      el.meta.textContent = `대체 수(휴리스틱) · ${decision.error}`;
+      this.setConfidence(lane, null);
+      el.alts.replaceChildren();
+    }
+    const cost = (m.inputTokens / 1e6) * JEV_PRICE_PER_MTOK;
+    const agree = m.jevCalls ? percent(m.agreements / m.jevCalls) : '—';
+    el.foot.textContent =
+      `호출 ${m.jevCalls}회 · 입력 ${formatNumber(m.inputTokens)}토큰 · $${cost.toFixed(4)} 추정 · 휴리스틱과 같은 수 ${agree}` +
+      (m.fallbacks ? ` · 대체 ${m.fallbacks}회` : '');
+    el.json.textContent = JSON.stringify(decisionJson(decision), null, 2);
+  }
+
+  renderAlternatives(lane, alternatives, format) {
+    lane.el.alts.replaceChildren(
+      ...alternatives.map(({ move, value }) => {
+        const item = document.createElement('li');
+        const label = document.createElement('span');
+        label.textContent = moveLabel(move);
+        const amount = document.createElement('b');
+        amount.textContent = format(value);
+        item.append(label, amount);
+        return item;
+      }),
+    );
+  }
+
+  // ── 그리기 ──────────────────────────────────────────────
+
+  draw(now) {
+    for (const lane of this.lanes) {
+      const game = lane.game;
+      if (!game) continue;
+      lane.board.draw(game, now, lane.target);
+      lane.hold.drawHold(game);
+      lane.next.drawNext(game, 1);
+      this.text(lane, 'score', formatNumber(game.score));
+      this.text(lane, 'lines', String(game.lines));
+      this.text(lane, 'pieces', `${game.stats.pieces}/${this.limit}`);
+      this.text(lane, 'holes', String(lane.metrics.holes));
+      const state = this.stateOf(lane);
+      this.text(lane, 'state', state.label);
+      if (lane.node.dataset.state !== state.key) lane.node.dataset.state = state.key;
+    }
+  }
+
+  text(lane, key, value) {
+    if (lane.cache.get(key) === value) return;
+    lane.cache.set(key, value);
+    lane.el[key].textContent = value;
+  }
+
+  stateOf(lane) {
+    const game = lane.game;
+    if (lane.disabled) return { key: 'off', label: '불참' };
+    if (game.state === 'finished') return { key: 'done', label: '완주' };
+    if (game.state === 'over') return { key: 'over', label: '게임 오버' };
+    if (game.state === 'ready') return { key: 'ready', label: '대기' };
+    if (lane.driver?.phase === 'thinking') return { key: 'thinking', label: '생각 중…' };
+    return { key: 'playing', label: lane.driver ? '두는 중' : '플레이 중' };
+  }
+
+  // ── 결과 ────────────────────────────────────────────────
+
+  standings() {
+    const players = this.lanes.filter((lane) => !lane.disabled);
+    return players
+      .map((lane) => ({ lane, finished: lane.game.state === 'finished', score: lane.game.score }))
+      .sort((a, b) => Number(b.finished) - Number(a.finished) || b.score - a.score)
+      .map(({ lane }, i) => ({ lane, rank: i + 1 }));
+  }
+
+  renderResults() {
+    const ranks = new Map(this.standings().map(({ lane, rank }) => [lane.id, rank]));
+    const winner = this.lanes.find((lane) => ranks.get(lane.id) === 1);
+    this.el.sub.textContent = `모두 같은 ${this.limit}피스를 같은 순서(시드 ${this.seed})로 받았어요.${winner ? ` 1위는 ${winner.name}!` : ''}`;
+
+    const table = this.el.table;
+    const head = document.createElement('tr');
+    head.append(cell('th', '항목'));
+    for (const lane of this.lanes) {
+      const th = cell('th', lane.name);
+      th.dataset.lane = lane.id;
+      const rank = ranks.get(lane.id);
+      if (rank) th.append(badge(`${rank}위`, rank === 1));
+      head.append(th);
+    }
+    const rows = RESULT_ROWS.map((row) => {
+      const tr = document.createElement('tr');
+      tr.append(cell('th', row.label));
+      const values = this.lanes.map((lane) => (lane.disabled || (row.only && row.only !== lane.id) ? null : row.value(lane)));
+      const best = row.better ? bestOf(values, row.better) : null;
+      values.forEach((value, i) => {
+        const td = cell('td', value === null ? '—' : row.format ? row.format(value, this.lanes[i]) : String(value));
+        if (best !== null && value === best) td.classList.add('is-best');
+        tr.append(td);
+      });
+      return tr;
+    });
+    const thead = document.createElement('thead');
+    thead.append(head);
+    const tbody = document.createElement('tbody');
+    tbody.append(...rows);
+    table.replaceChildren(thead, tbody);
+  }
+}
+
+function cell(tag, text) {
+  const node = document.createElement(tag);
+  node.textContent = text;
+  return node;
+}
+
+function badge(text, first) {
+  const node = document.createElement('span');
+  node.className = `rank-badge${first ? ' is-first' : ''}`;
+  node.textContent = text;
+  return node;
+}
+
+// 모두 같은 값이면 강조하지 않는다(전원 0점 같은 경우).
+function bestOf(values, better) {
+  const present = values.filter((v) => v !== null);
+  if (present.length < 2 || present.every((v) => v === present[0])) return null;
+  return better === 'high' ? Math.max(...present) : Math.min(...present);
+}
+
+function decisionJson(decision) {
+  const move = decision.move;
+  const base = {
+    choice: move.id,
+    type: move.type,
+    hold: move.hold,
+    rotationDegrees: ROTATION_DEG[move.rot],
+    columns: move.columns.map((c) => c + 1),
+    actions: move.actions,
+  };
+  if (decision.source !== 'jev') return { source: 'fallback', error: decision.error, ...base };
+  return {
+    model: decision.model,
+    ...base,
+    confidence: decision.confidence,
+    agreesWithHeuristic: decision.agrees,
+    candidates: decision.candidates,
+    latencyMs: Math.round(decision.ms),
+    inputTokens: decision.usage?.input_tokens,
+    requestId: decision.requestId,
+  };
+}
+
+const RESULT_ROWS = [
+  {
+    label: '결과',
+    value: (lane) => lane.game.state,
+    format: (state, lane) => (state === 'finished' ? '완주' : `게임 오버 (${lane.game.stats.pieces}피스)`),
+  },
+  { label: '점수', value: (lane) => lane.game.score, better: 'high', format: formatNumber },
+  { label: '지운 줄', value: (lane) => lane.game.lines, better: 'high' },
+  { label: '테트리스', value: (lane) => lane.game.stats.tetrises, better: 'high' },
+  { label: '남은 구멍', value: (lane) => lane.metrics.holes, better: 'low' },
+  { label: '생긴 구멍 (누적)', value: (lane) => lane.metrics.holesCreated, better: 'low' },
+  { label: '가장 높이 쌓인 줄', value: (lane) => lane.metrics.peak, better: 'low' },
+  {
+    label: '피스당 판단 시간',
+    value: (lane) => {
+      const m = lane.metrics;
+      if (lane.id === 'human') return lane.game.stats.pieces ? m.wallMs / lane.game.stats.pieces : 0;
+      return m.decisions ? m.thinkMs / m.decisions : 0;
+    },
+    format: (ms, lane) => `${ms < 10 ? ms.toFixed(1) : Math.round(ms)}ms${lane.id === 'human' ? ' (조작 포함)' : ''}`,
+  },
+  {
+    label: 'Jev 평균 확신도',
+    only: 'jev',
+    value: (lane) => (lane.metrics.jevCalls ? lane.metrics.confidenceSum / lane.metrics.jevCalls : null),
+    format: percent,
+  },
+  {
+    label: '휴리스틱과 같은 수',
+    only: 'jev',
+    value: (lane) => (lane.metrics.jevCalls ? lane.metrics.agreements / lane.metrics.jevCalls : null),
+    format: percent,
+  },
+  {
+    label: 'Jev 호출 · 비용',
+    only: 'jev',
+    value: (lane) => lane.metrics,
+    format: (m) =>
+      `${m.jevCalls}회 · $${((m.inputTokens / 1e6) * JEV_PRICE_PER_MTOK).toFixed(4)}` + (m.fallbacks ? ` · 대체 ${m.fallbacks}회` : ''),
+  },
+];
+return { VERSUS_LIMITS, stepMsFor, Versus };
+})();
+
 // ── src/main.js ──
 const __src_main_js = (() => {
 const { Game } = __src_core_game_js;
+const { randomSeed } = __src_core_random_js;
 const { InputController, KEY_ACTIONS, bindTouchPad } = __src_ui_input_js;
 const { BoardRenderer, PreviewRenderer, readPalette } = __src_ui_renderer_js;
 const { Hud, describeClear, formatNumber, formatTime } = __src_ui_hud_js;
 const { Sfx } = __src_ui_audio_js;
 const { storage } = __src_ui_storage_js;
+const { VERSUS_LIMITS, Versus } = __src_versus_js;
 const READY_MS = 900;
 const GO_MS = 600;
 const MIN_LEVEL = 1;
 const MAX_START_LEVEL = 15;
+const RESULT_DELAY_MS = 1200; // 대결이 끝나고 결과표를 띄우기까지
 
 const $ = (sel) => document.querySelector(sel);
 const root = $('#app');
@@ -1296,17 +2377,31 @@ new PreviewRenderer($('#title-art'), palette).drawLineup(['I', 'O', 'T', 'S', 'Z
 const hud = new Hud(root);
 const input = new InputController();
 const sfx = new Sfx(storage.get('sound', true));
+const versus = new Versus({ root, palette, sfx, storage });
 
 let game = null;
+let mode = 'single'; // single | versus
 let screen = 'title';
 let countdown = 0;
 let goTimer = 0;
 let startLevel = clampLevel(storage.get('level', 1));
 let best = storage.get('best', 0);
 let hardDropping = false;
+let vsLimit = VERSUS_LIMITS.includes(storage.get('vs-limit', 50)) ? storage.get('vs-limit', 50) : 50;
+let resultTimer = 0;
 
 function clampLevel(n) {
   return Math.min(MAX_START_LEVEL, Math.max(MIN_LEVEL, Number(n) || 1));
+}
+
+function setMode(next) {
+  mode = next;
+  root.dataset.mode = next;
+}
+
+function setCountdown(text) {
+  if (mode === 'versus') versus.setCountdown(text);
+  else hud.setCountdown(text);
 }
 
 function setScreen(next) {
@@ -1319,6 +2414,8 @@ function setScreen(next) {
 
 function newGame() {
   sfx.unlock();
+  versus.stop();
+  setMode('single');
   game = new Game({ startLevel, rng: Math.random });
   bindGameEvents(game);
   input.attach(game);
@@ -1331,6 +2428,36 @@ function newGame() {
   setScreen('countdown');
 }
 
+// 대결: 나 · Jev · 휴리스틱이 같은 시드로 같은 피스 수를 둔다. 같은 시드를 넘기면 같은 순서로 재대결.
+function startVersus(seed = randomSeed()) {
+  sfx.unlock();
+  setMode('versus');
+  game = null;
+  hud.reset();
+  input.attach(versus.prepare({ seed, limit: vsLimit, startLevel }));
+  countdown = READY_MS;
+  goTimer = 0;
+  resultTimer = 0;
+  setCountdown('READY');
+  sfx.play('ready');
+  setScreen('countdown');
+}
+
+function restart() {
+  if (mode === 'versus') startVersus(versus.seed);
+  else newGame();
+}
+
+function showResult() {
+  input.releaseAll();
+  versus.renderResults();
+  sfx.play('levelup');
+  setScreen('result');
+  setTimeout(() => {
+    if (screen === 'result') $('#btn-vs-again').focus();
+  }, 500);
+}
+
 function pause() {
   if (screen !== 'playing' && screen !== 'countdown') return;
   input.releaseAll();
@@ -1340,10 +2467,13 @@ function pause() {
 
 function resume() {
   if (screen !== 'paused') return;
-  setScreen(game.state === 'ready' ? 'countdown' : 'playing');
+  const notStarted = mode === 'versus' ? !versus.started : game.state === 'ready';
+  setScreen(notStarted ? 'countdown' : 'playing');
 }
 
 function toTitle() {
+  versus.stop();
+  setMode('single');
   game = null;
   input.attach(null);
   hud.reset();
@@ -1412,11 +2542,19 @@ function bindGameEvents(g) {
 function renderTitle() {
   $('#start-level').textContent = pad2(startLevel);
   $('#title-best').textContent = formatNumber(best);
+  $('#vs-limit').textContent = String(vsLimit);
 }
 
 function changeLevel(delta) {
   startLevel = clampLevel(startLevel + delta);
   storage.set('level', startLevel);
+  renderTitle();
+}
+
+function changeVsLimit(delta) {
+  const i = VERSUS_LIMITS.indexOf(vsLimit) + delta;
+  vsLimit = VERSUS_LIMITS[Math.min(VERSUS_LIMITS.length - 1, Math.max(0, i))];
+  storage.set('vs-limit', vsLimit);
   renderTitle();
 }
 
@@ -1451,6 +2589,9 @@ window.addEventListener('keydown', (e) => {
     if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault();
       newGame();
+    } else if (e.code === 'KeyV') {
+      e.preventDefault();
+      startVersus();
     } else if (e.code === 'ArrowLeft' || e.code === 'ArrowDown') {
       e.preventDefault();
       changeLevel(-1);
@@ -1465,6 +2606,22 @@ window.addEventListener('keydown', (e) => {
     if (PAUSE_KEYS.has(e.code)) {
       e.preventDefault();
       resume();
+    }
+    return;
+  }
+
+  if (screen === 'result') {
+    if (e.code === 'Enter') {
+      e.preventDefault();
+      startVersus(versus.seed);
+    } else if (e.code === 'KeyN') {
+      e.preventDefault();
+      startVersus();
+    } else if (e.code === 'Escape') {
+      e.preventDefault();
+      toTitle();
+    } else if (action) {
+      e.preventDefault();
     }
     return;
   }
@@ -1510,12 +2667,18 @@ $('#btn-start').addEventListener('click', newGame);
 $('#level-down').addEventListener('click', () => changeLevel(-1));
 $('#level-up').addEventListener('click', () => changeLevel(1));
 $('#btn-resume').addEventListener('click', resume);
-$('#btn-restart').addEventListener('click', newGame);
+$('#btn-restart').addEventListener('click', restart);
 $('#btn-quit').addEventListener('click', toTitle);
 $('#btn-again').addEventListener('click', newGame);
 $('#btn-home').addEventListener('click', toTitle);
 $('#btn-sound').addEventListener('click', toggleSound);
 $('#btn-pause').addEventListener('click', () => (screen === 'paused' ? resume() : pause()));
+$('#btn-versus').addEventListener('click', () => startVersus());
+$('#vs-limit-down').addEventListener('click', () => changeVsLimit(-1));
+$('#vs-limit-up').addEventListener('click', () => changeVsLimit(1));
+$('#btn-vs-again').addEventListener('click', () => startVersus(versus.seed));
+$('#btn-vs-new').addEventListener('click', () => startVersus());
+$('#btn-vs-home').addEventListener('click', toTitle);
 
 // ── 루프 ────────────────────────────────────────────────
 
@@ -1528,38 +2691,57 @@ function frame(now) {
   if (screen === 'countdown') {
     countdown -= dt;
     if (countdown <= 0) {
-      game.start();
+      if (mode === 'versus') versus.start();
+      else game.start();
       setScreen('playing');
-      hud.setCountdown('GO!');
+      setCountdown('GO!');
       sfx.play('go');
       goTimer = GO_MS;
     }
   } else if (screen === 'playing') {
     input.update(dt);
-    game.update(dt);
+    if (mode === 'versus') {
+      versus.update(dt);
+      if (versus.done) {
+        resultTimer += dt;
+        if (resultTimer >= RESULT_DELAY_MS) showResult();
+      }
+    } else {
+      game.update(dt);
+    }
   }
 
   if (goTimer > 0 && screen === 'playing') {
     goTimer -= dt;
-    if (goTimer <= 0) hud.setCountdown('');
+    if (goTimer <= 0) setCountdown('');
   }
 
-  board.draw(game, now);
-  if (game) {
-    holdView.drawHold(game);
-    nextView.drawNext(game);
-    hud.update(game);
+  if (mode === 'versus') {
+    versus.draw(now);
+  } else {
+    board.draw(game, now);
+    if (game) {
+      holdView.drawHold(game);
+      nextView.drawNext(game);
+      hud.update(game);
+    }
   }
   requestAnimationFrame(frame);
 }
 
 renderTitle();
 renderSound();
+setMode('single');
 setScreen('title');
 requestAnimationFrame(frame);
 
 // 개발·검증용 핸들(콘솔에서 상태 확인).
-window.__tetris = { get game() { return game; }, get screen() { return screen; } };
+window.__tetris = {
+  get game() { return game; },
+  get screen() { return screen; },
+  get mode() { return mode; },
+  versus,
+};
 return {  };
 })();
 })();

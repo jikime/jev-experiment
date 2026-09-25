@@ -20,9 +20,11 @@ const T_CORNERS = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
 
 // DOM에 의존하지 않는 게임 규칙 엔진. UI는 이벤트(on)와 공개 상태만 읽는다.
 export class Game {
-  constructor({ startLevel = 1, rng = Math.random } = {}) {
+  // pieceLimit: 이 수만큼 피스를 고정하면 'finished'로 끝난다(대결 모드). 기본은 끝없음.
+  constructor({ startLevel = 1, rng = Math.random, pieceLimit = Infinity } = {}) {
     this.startLevel = Math.min(Math.max(1, Math.floor(startLevel)), 15);
     this.rng = rng;
+    this.pieceLimit = pieceLimit;
     this.listeners = new Map();
     this.reset();
   }
@@ -51,7 +53,7 @@ export class Game {
     this.combo = -1;
     this.b2b = false;
     this.elapsed = 0;
-    this.state = 'ready'; // ready | playing | clearing | over
+    this.state = 'ready'; // ready | playing | clearing | over | finished
     this.overReason = null;
     this.softDrop = false;
     this.gravityAcc = 0;
@@ -284,7 +286,7 @@ export class Game {
         this.stats.tspins += 1;
         this.emit('clear', { lines, tspin, b2b: false, combo: this.combo, perfectClear: false, points });
       }
-      this.spawn(this.takeNext());
+      this.advance();
       return;
     }
 
@@ -318,6 +320,16 @@ export class Game {
   finishClear() {
     this.clearing = null;
     this.state = 'playing';
+    this.advance();
+  }
+
+  // 다음 피스를 내보내거나, 정해진 피스 수를 다 뒀으면 끝낸다.
+  advance() {
+    if (this.stats.pieces >= this.pieceLimit) {
+      this.state = 'finished';
+      this.emit('finished', { pieces: this.stats.pieces });
+      return;
+    }
     this.spawn(this.takeNext());
   }
 

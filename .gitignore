@@ -1,0 +1,5 @@
+# 비밀 값 — TypeSafe API 키가 들어 있다
+.env
+
+# macOS
+.DS_Store

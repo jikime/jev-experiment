@@ -79,10 +79,12 @@ export function drawPiece(ctx, type, cx, cy, s, palette, alpha = 1) {
 }
 
 export class BoardRenderer {
-  constructor(canvas, container, palette) {
+  // syncWellTop: 옆 패널 정렬용 CSS 변수를 이 보드 기준으로 맞출지(대결 모드의 보드들은 끈다).
+  constructor(canvas, container, palette, { syncWellTop = true } = {}) {
     this.canvas = canvas;
     this.container = container;
     this.palette = palette;
+    this.syncWellTop = syncWellTop;
     this.ctx = null;
     this.resetFx();
     this.fit();
@@ -113,7 +115,7 @@ export class BoardRenderer {
     this.canvas.style.height = `${this.h}px`;
     this.ctx = setBackingStore(this.canvas, this.w, this.h);
     // 옆 패널을 우물 상단선에 맞추도록 CSS에 알려 준다.
-    document.documentElement.style.setProperty('--well-top', `${this.oy - this.frame}px`);
+    if (this.syncWellTop) document.documentElement.style.setProperty('--well-top', `${this.oy - this.frame}px`);
   }
 
   colX(c) {
@@ -145,7 +147,8 @@ export class BoardRenderer {
 
   // ── 그리기 ─────────────────────────────────────────────
 
-  draw(game, now) {
+  // target: 봇이 놓으려는 칸들. 주어지면 점선 윤곽으로 표시한다.
+  draw(game, now, target = null) {
     const { ctx } = this;
     if (!ctx) return;
     ctx.clearRect(0, 0, this.w, this.h);
@@ -158,6 +161,7 @@ export class BoardRenderer {
       if (live) this.drawDropGuide(game);
       this.drawStack(grid, now);
       if (game.clearing) this.drawClearing(game.clearing);
+      if (live && target) this.drawTarget(target);
       if (live) this.drawGhost(game);
       if (game.piece) this.drawActive(game.piece, game.state === 'over');
       this.drawTrails(now);
@@ -286,6 +290,20 @@ export class BoardRenderer {
     ctx.restore();
   }
 
+  drawTarget(cells) {
+    const { ctx, s, palette } = this;
+    const b = Math.max(2, s * 0.1);
+    ctx.save();
+    ctx.lineWidth = b;
+    ctx.strokeStyle = palette.accent;
+    ctx.setLineDash([s * 0.18, s * 0.12]);
+    for (const [x, y] of cells) {
+      if (y < HIDDEN_ROWS) continue;
+      ctx.strokeRect(this.colX(x) + b / 2, this.rowY(y) + b / 2, s - b, s - b);
+    }
+    ctx.restore();
+  }
+
   drawActive(piece, dimmed) {
     const { s, palette } = this;
     const blocks = SHAPES[piece.type][piece.rot]
@@ -359,8 +377,8 @@ export class PreviewRenderer {
     drawPiece(ctx, game.holdType, w / 2, h / 2, s, this.palette, game.holdUsed ? 0.3 : 1);
   }
 
-  drawNext(game) {
-    const queue = game.nextQueue;
+  drawNext(game, count = Infinity) {
+    const queue = game.nextQueue.slice(0, count);
     const key = `${queue.join('')}|${this.w}x${this.h}`;
     if (!this.ctx || key === this.key) return;
     this.key = key;

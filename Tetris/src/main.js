@@ -1,14 +1,17 @@
 import { Game } from './core/game.js';
+import { randomSeed } from './core/random.js';
 import { InputController, KEY_ACTIONS, bindTouchPad } from './ui/input.js';
 import { BoardRenderer, PreviewRenderer, readPalette } from './ui/renderer.js';
 import { Hud, describeClear, formatNumber, formatTime } from './ui/hud.js';
 import { Sfx } from './ui/audio.js';
 import { storage } from './ui/storage.js';
+import { VERSUS_LIMITS, Versus } from './versus.js';
 
 const READY_MS = 900;
 const GO_MS = 600;
 const MIN_LEVEL = 1;
 const MAX_START_LEVEL = 15;
+const RESULT_DELAY_MS = 1200; // 대결이 끝나고 결과표를 띄우기까지
 
 const $ = (sel) => document.querySelector(sel);
 const root = $('#app');
@@ -20,17 +23,31 @@ new PreviewRenderer($('#title-art'), palette).drawLineup(['I', 'O', 'T', 'S', 'Z
 const hud = new Hud(root);
 const input = new InputController();
 const sfx = new Sfx(storage.get('sound', true));
+const versus = new Versus({ root, palette, sfx, storage });
 
 let game = null;
+let mode = 'single'; // single | versus
 let screen = 'title';
 let countdown = 0;
 let goTimer = 0;
 let startLevel = clampLevel(storage.get('level', 1));
 let best = storage.get('best', 0);
 let hardDropping = false;
+let vsLimit = VERSUS_LIMITS.includes(storage.get('vs-limit', 50)) ? storage.get('vs-limit', 50) : 50;
+let resultTimer = 0;
 
 function clampLevel(n) {
   return Math.min(MAX_START_LEVEL, Math.max(MIN_LEVEL, Number(n) || 1));
+}
+
+function setMode(next) {
+  mode = next;
+  root.dataset.mode = next;
+}
+
+function setCountdown(text) {
+  if (mode === 'versus') versus.setCountdown(text);
+  else hud.setCountdown(text);
 }
 
 function setScreen(next) {
@@ -43,6 +60,8 @@ function setScreen(next) {
 
 function newGame() {
   sfx.unlock();
+  versus.stop();
+  setMode('single');
   game = new Game({ startLevel, rng: Math.random });
   bindGameEvents(game);
   input.attach(game);
@@ -55,6 +74,36 @@ function newGame() {
   setScreen('countdown');
 }
 
+// 대결: 나 · Jev · 휴리스틱이 같은 시드로 같은 피스 수를 둔다. 같은 시드를 넘기면 같은 순서로 재대결.
+function startVersus(seed = randomSeed()) {
+  sfx.unlock();
+  setMode('versus');
+  game = null;
+  hud.reset();
+  input.attach(versus.prepare({ seed, limit: vsLimit, startLevel }));
+  countdown = READY_MS;
+  goTimer = 0;
+  resultTimer = 0;
+  setCountdown('READY');
+  sfx.play('ready');
+  setScreen('countdown');
+}
+
+function restart() {
+  if (mode === 'versus') startVersus(versus.seed);
+  else newGame();
+}
+
+function showResult() {
+  input.releaseAll();
+  versus.renderResults();
+  sfx.play('levelup');
+  setScreen('result');
+  setTimeout(() => {
+    if (screen === 'result') $('#btn-vs-again').focus();
+  }, 500);
+}
+
 function pause() {
   if (screen !== 'playing' && screen !== 'countdown') return;
   input.releaseAll();
@@ -64,10 +113,13 @@ function pause() {
 
 function resume() {
   if (screen !== 'paused') return;
-  setScreen(game.state === 'ready' ? 'countdown' : 'playing');
+  const notStarted = mode === 'versus' ? !versus.started : game.state === 'ready';
+  setScreen(notStarted ? 'countdown' : 'playing');
 }
 
 function toTitle() {
+  versus.stop();
+  setMode('single');
   game = null;
   input.attach(null);
   hud.reset();
@@ -136,11 +188,19 @@ function bindGameEvents(g) {
 function renderTitle() {
   $('#start-level').textContent = pad2(startLevel);
   $('#title-best').textContent = formatNumber(best);
+  $('#vs-limit').textContent = String(vsLimit);
 }
 
 function changeLevel(delta) {
   startLevel = clampLevel(startLevel + delta);
   storage.set('level', startLevel);
+  renderTitle();
+}
+
+function changeVsLimit(delta) {
+  const i = VERSUS_LIMITS.indexOf(vsLimit) + delta;
+  vsLimit = VERSUS_LIMITS[Math.min(VERSUS_LIMITS.length - 1, Math.max(0, i))];
+  storage.set('vs-limit', vsLimit);
   renderTitle();
 }
 
@@ -175,6 +235,9 @@ window.addEventListener('keydown', (e) => {
     if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault();
       newGame();
+    } else if (e.code === 'KeyV') {
+      e.preventDefault();
+      startVersus();
     } else if (e.code === 'ArrowLeft' || e.code === 'ArrowDown') {
       e.preventDefault();
       changeLevel(-1);
@@ -189,6 +252,22 @@ window.addEventListener('keydown', (e) => {
     if (PAUSE_KEYS.has(e.code)) {
       e.preventDefault();
       resume();
+    }
+    return;
+  }
+
+  if (screen === 'result') {
+    if (e.code === 'Enter') {
+      e.preventDefault();
+      startVersus(versus.seed);
+    } else if (e.code === 'KeyN') {
+      e.preventDefault();
+      startVersus();
+    } else if (e.code === 'Escape') {
+      e.preventDefault();
+      toTitle();
+    } else if (action) {
+      e.preventDefault();
     }
     return;
   }
@@ -234,12 +313,18 @@ $('#btn-start').addEventListener('click', newGame);
 $('#level-down').addEventListener('click', () => changeLevel(-1));
 $('#level-up').addEventListener('click', () => changeLevel(1));
 $('#btn-resume').addEventListener('click', resume);
-$('#btn-restart').addEventListener('click', newGame);
+$('#btn-restart').addEventListener('click', restart);
 $('#btn-quit').addEventListener('click', toTitle);
 $('#btn-again').addEventListener('click', newGame);
 $('#btn-home').addEventListener('click', toTitle);
 $('#btn-sound').addEventListener('click', toggleSound);
 $('#btn-pause').addEventListener('click', () => (screen === 'paused' ? resume() : pause()));
+$('#btn-versus').addEventListener('click', () => startVersus());
+$('#vs-limit-down').addEventListener('click', () => changeVsLimit(-1));
+$('#vs-limit-up').addEventListener('click', () => changeVsLimit(1));
+$('#btn-vs-again').addEventListener('click', () => startVersus(versus.seed));
+$('#btn-vs-new').addEventListener('click', () => startVersus());
+$('#btn-vs-home').addEventListener('click', toTitle);
 
 // ── 루프 ────────────────────────────────────────────────
 
@@ -252,35 +337,54 @@ function frame(now) {
   if (screen === 'countdown') {
     countdown -= dt;
     if (countdown <= 0) {
-      game.start();
+      if (mode === 'versus') versus.start();
+      else game.start();
       setScreen('playing');
-      hud.setCountdown('GO!');
+      setCountdown('GO!');
       sfx.play('go');
       goTimer = GO_MS;
     }
   } else if (screen === 'playing') {
     input.update(dt);
-    game.update(dt);
+    if (mode === 'versus') {
+      versus.update(dt);
+      if (versus.done) {
+        resultTimer += dt;
+        if (resultTimer >= RESULT_DELAY_MS) showResult();
+      }
+    } else {
+      game.update(dt);
+    }
   }
 
   if (goTimer > 0 && screen === 'playing') {
     goTimer -= dt;
-    if (goTimer <= 0) hud.setCountdown('');
+    if (goTimer <= 0) setCountdown('');
   }
 
-  board.draw(game, now);
-  if (game) {
-    holdView.drawHold(game);
-    nextView.drawNext(game);
-    hud.update(game);
+  if (mode === 'versus') {
+    versus.draw(now);
+  } else {
+    board.draw(game, now);
+    if (game) {
+      holdView.drawHold(game);
+      nextView.drawNext(game);
+      hud.update(game);
+    }
   }
   requestAnimationFrame(frame);
 }
 
 renderTitle();
 renderSound();
+setMode('single');
 setScreen('title');
 requestAnimationFrame(frame);
 
 // 개발·검증용 핸들(콘솔에서 상태 확인).
-window.__tetris = { get game() { return game; }, get screen() { return screen; } };
+window.__tetris = {
+  get game() { return game; },
+  get screen() { return screen; },
+  get mode() { return mode; },
+  versus,
+};
