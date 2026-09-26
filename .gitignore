@@ -6,3 +6,6 @@
 
 # 벤치마크 결과·Jev 응답 캐시
 bench-out/
+
+# Vercel 배포 빌드 결과(npm run vercel-build)
+public/

@@ -8,7 +8,8 @@
     "start": "node scripts/serve.mjs",
     "build": "node scripts/build.mjs",
     "test": "node --test",
-    "bench": "node scripts/bench.mjs"
+    "bench": "node scripts/bench.mjs",
+    "vercel-build": "node scripts/vercel-build.mjs"
   },
   "engines": {
     "node": "22.x"
