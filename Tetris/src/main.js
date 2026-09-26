@@ -6,6 +6,7 @@ import { Hud, describeClear, formatNumber, formatTime } from './ui/hud.js';
 import { Sfx } from './ui/audio.js';
 import { storage } from './ui/storage.js';
 import { VERSUS_LIMITS, Versus } from './versus.js';
+import { jevStatus, setJevPassword } from './ai/jev.js';
 
 const READY_MS = 900;
 const GO_MS = 600;
@@ -47,6 +48,37 @@ for (const radio of jevModeInputs) {
   radio.addEventListener('change', () => storage.set('vs-jev-mode', radio.value));
 }
 const jevMode = () => jevModeInputs.find((radio) => radio.checked)?.value ?? 'plus';
+
+// 배포 사이트의 Jev가 비밀번호로 잠겨 있으면 입력칸을 보여 준다. 확인은 서버가 하고, 이 브라우저에만 기억한다.
+const passwordRow = $('#vs-password-row');
+const passwordInput = $('#vs-password');
+const passwordNote = $('#vs-password-note');
+passwordInput.value = storage.get('jev-password', '');
+setJevPassword(passwordInput.value);
+
+function applyPassword() {
+  setJevPassword(passwordInput.value);
+  storage.set('jev-password', passwordInput.value.trim());
+}
+
+async function refreshJevLock() {
+  const status = await jevStatus();
+  passwordRow.hidden = !status.locked;
+  if (!status.locked) return;
+  passwordRow.dataset.state = status.state;
+  passwordNote.textContent =
+    status.state === 'ready'
+      ? '확인됐어요 ✓'
+      : passwordInput.value
+        ? '비밀번호가 맞지 않아요'
+        : '이 사이트의 Jev는 비밀번호를 아는 사람만 쓸 수 있어요';
+}
+
+passwordInput.addEventListener('change', () => {
+  applyPassword();
+  refreshJevLock();
+});
+refreshJevLock();
 
 // 경기 중 전략 바꾸기: 보내고 나면 입력칸에서 빠져나와 키보드가 다시 게임을 조작하게 한다.
 const liveStrategy = $('#vs-strategy-live');
@@ -99,6 +131,7 @@ function newGame() {
 // 대결: 나 · Jev · 휴리스틱이 같은 시드로 같은 피스 수를 둔다. 같은 시드를 넘기면 같은 순서로 재대결.
 function startVersus(seed = randomSeed()) {
   sfx.unlock();
+  applyPassword();
   setMode('versus');
   game = null;
   hud.reset();
@@ -252,8 +285,8 @@ window.addEventListener('keydown', (e) => {
   // 입력칸·체크박스·라디오에서는 글자를 치거나 선택을 바꾸게 둔다.
   // 타이틀의 전략 칸에서 Enter는 대결 시작, 경기 중 전략 칸의 Enter는 폼 제출(전략 바꾸기).
   const field = e.target;
-  if (field instanceof HTMLInputElement && ['text', 'checkbox', 'radio'].includes(field.type)) {
-    if (field.id === 'vs-strategy' && e.code === 'Enter' && !e.isComposing) {
+  if (field instanceof HTMLInputElement && ['text', 'password', 'checkbox', 'radio'].includes(field.type)) {
+    if ((field.id === 'vs-strategy' || field.id === 'vs-password') && e.code === 'Enter' && !e.isComposing) {
       e.preventDefault();
       startVersus();
     }

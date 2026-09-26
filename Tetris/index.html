@@ -199,6 +199,10 @@
                 <label><input type="radio" name="vs-jev-mode" value="plus" checked /> <b>Jev+</b> <small>휴리스틱이 고른 안전한 5수 중에서 선택 (추천)</small></label>
                 <label><input type="radio" name="vs-jev-mode" value="solo" /> <b>Jev 단독</b> <small>모든 후보에서 직접 선택</small></label>
               </fieldset>
+              <label class="vs-strategy vs-password" id="vs-password-row" hidden>
+                <span>Jev 비밀번호 <small id="vs-password-note">이 사이트의 Jev는 비밀번호를 아는 사람만 쓸 수 있어요</small></span>
+                <input type="password" id="vs-password" maxlength="64" autocomplete="off" />
+              </label>
               <label class="vs-strategy">
                 <span>Jev에게 전략 말하기 <small>(선택 · 비워 두면 기본 플레이)</small></span>
                 <input type="text" id="vs-strategy" maxlength="120" autocomplete="off" placeholder="예: 오른쪽 끝 한 줄을 비워 두고 테트리스를 노려" />

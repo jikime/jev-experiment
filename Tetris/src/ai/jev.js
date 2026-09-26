@@ -162,15 +162,25 @@ export function buildJevRequest(snapshot, moves, { board = false, recheck = fals
 
 // ── 서버 호출 ──────────────────────────────────────────
 
-// ready: 참가 가능 · nokey: 서버에 키가 없음 · offline: 개발 서버가 아님(file:// 등)
+// 서버가 비밀번호로 잠겨 있으면(JEV_PASSWORD) 요청마다 헤더로 보낸다. 확인은 서버가 한다.
+let password = '';
+export function setJevPassword(value) {
+  password = String(value ?? '').trim();
+}
+const authHeaders = () => (password ? { 'x-jev-password': password } : {});
+
+// ready: 참가 가능 · locked: 비밀번호가 없거나 틀림 · nokey: 서버에 키가 없음 · offline: 개발 서버·배포 함수가 없음(file:// 등)
+// locked 필드: 서버가 비밀번호를 요구하는지(맞게 넣었어도 true).
 export async function jevStatus() {
   try {
-    const res = await fetch(`${JEV_ENDPOINT}/status`, { cache: 'no-store' });
-    if (!res.ok) return { state: 'offline' };
+    const res = await fetch(`${JEV_ENDPOINT}/status`, { cache: 'no-store', headers: authHeaders() });
+    if (!res.ok) return { state: 'offline', locked: false };
     const body = await res.json();
-    return body.configured ? { state: 'ready', model: body.model } : { state: 'nokey' };
+    if (!body.configured) return { state: 'nokey', locked: Boolean(body.locked) };
+    if (body.locked && !body.authorized) return { state: 'locked', locked: true, hasPassword: Boolean(password) };
+    return { state: 'ready', model: body.model, locked: Boolean(body.locked) };
   } catch {
-    return { state: 'offline' };
+    return { state: 'offline', locked: false };
   }
 }
 
@@ -178,7 +188,7 @@ export async function askJev(request, { timeoutMs = 20_000 } = {}) {
   const started = performance.now();
   const res = await fetch(JEV_ENDPOINT, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(request),
     signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined,
   });

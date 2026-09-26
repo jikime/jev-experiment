@@ -1916,15 +1916,25 @@ function buildJevRequest(snapshot, moves, { board = false, recheck = false, poli
 
 // ── 서버 호출 ──────────────────────────────────────────
 
-// ready: 참가 가능 · nokey: 서버에 키가 없음 · offline: 개발 서버가 아님(file:// 등)
+// 서버가 비밀번호로 잠겨 있으면(JEV_PASSWORD) 요청마다 헤더로 보낸다. 확인은 서버가 한다.
+let password = '';
+function setJevPassword(value) {
+  password = String(value ?? '').trim();
+}
+const authHeaders = () => (password ? { 'x-jev-password': password } : {});
+
+// ready: 참가 가능 · locked: 비밀번호가 없거나 틀림 · nokey: 서버에 키가 없음 · offline: 개발 서버·배포 함수가 없음(file:// 등)
+// locked 필드: 서버가 비밀번호를 요구하는지(맞게 넣었어도 true).
 async function jevStatus() {
   try {
-    const res = await fetch(`${JEV_ENDPOINT}/status`, { cache: 'no-store' });
-    if (!res.ok) return { state: 'offline' };
+    const res = await fetch(`${JEV_ENDPOINT}/status`, { cache: 'no-store', headers: authHeaders() });
+    if (!res.ok) return { state: 'offline', locked: false };
     const body = await res.json();
-    return body.configured ? { state: 'ready', model: body.model } : { state: 'nokey' };
+    if (!body.configured) return { state: 'nokey', locked: Boolean(body.locked) };
+    if (body.locked && !body.authorized) return { state: 'locked', locked: true, hasPassword: Boolean(password) };
+    return { state: 'ready', model: body.model, locked: Boolean(body.locked) };
   } catch {
-    return { state: 'offline' };
+    return { state: 'offline', locked: false };
   }
 }
 
@@ -1932,7 +1942,7 @@ async function askJev(request, { timeoutMs = 20_000 } = {}) {
   const started = performance.now();
   const res = await fetch(JEV_ENDPOINT, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(request),
     signal: typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(timeoutMs) : undefined,
   });
@@ -2104,7 +2114,7 @@ class JevPlusBrain {
     }
   }
 }
-return { JEV_ENDPOINT, JEV_PRICE_PER_MTOK, QUESTION_ID, describeMove, boardRows, buildJevRequest, jevStatus, askJev, GATE_CONFIDENCE, SHORTLIST, JevBrain, groupByDescription, PLUS_GATE, JevPlusBrain };
+return { JEV_ENDPOINT, JEV_PRICE_PER_MTOK, QUESTION_ID, describeMove, boardRows, buildJevRequest, setJevPassword, jevStatus, askJev, GATE_CONFIDENCE, SHORTLIST, JevBrain, groupByDescription, PLUS_GATE, JevPlusBrain };
 })();
 
 // ── src/ai/strategy.js ──
@@ -2490,8 +2500,9 @@ class Versus {
     const text = {
       checking: 'Jev 연결 확인 중…',
       ready: `Jev 연결됨 · ${status.model}`,
-      nokey: 'Jev 꺼짐 · Tetris/.env에 TYPESAFE_API_KEY가 없어요',
-      offline: 'Jev 꺼짐 · npm start로 연 페이지에서만 참가해요',
+      nokey: 'Jev 꺼짐 · 서버에 TYPESAFE_API_KEY가 없어요',
+      locked: status.hasPassword ? 'Jev 꺼짐 · 비밀번호가 맞지 않아요 (타이틀에서 다시 입력)' : 'Jev 꺼짐 · 비밀번호가 필요해요 (타이틀에서 입력)',
+      offline: 'Jev 꺼짐 · 서버(npm start 또는 배포 사이트)로 연 페이지에서만 참가해요',
     }[status.state];
     this.el.jev.textContent = text;
     this.el.jev.dataset.state = status.state;
@@ -2869,6 +2880,7 @@ const { Hud, describeClear, formatNumber, formatTime } = __src_ui_hud_js;
 const { Sfx } = __src_ui_audio_js;
 const { storage } = __src_ui_storage_js;
 const { VERSUS_LIMITS, Versus } = __src_versus_js;
+const { jevStatus, setJevPassword } = __src_ai_jev_js;
 const READY_MS = 900;
 const GO_MS = 600;
 const MIN_LEVEL = 1;
@@ -2909,6 +2921,37 @@ for (const radio of jevModeInputs) {
   radio.addEventListener('change', () => storage.set('vs-jev-mode', radio.value));
 }
 const jevMode = () => jevModeInputs.find((radio) => radio.checked)?.value ?? 'plus';
+
+// 배포 사이트의 Jev가 비밀번호로 잠겨 있으면 입력칸을 보여 준다. 확인은 서버가 하고, 이 브라우저에만 기억한다.
+const passwordRow = $('#vs-password-row');
+const passwordInput = $('#vs-password');
+const passwordNote = $('#vs-password-note');
+passwordInput.value = storage.get('jev-password', '');
+setJevPassword(passwordInput.value);
+
+function applyPassword() {
+  setJevPassword(passwordInput.value);
+  storage.set('jev-password', passwordInput.value.trim());
+}
+
+async function refreshJevLock() {
+  const status = await jevStatus();
+  passwordRow.hidden = !status.locked;
+  if (!status.locked) return;
+  passwordRow.dataset.state = status.state;
+  passwordNote.textContent =
+    status.state === 'ready'
+      ? '확인됐어요 ✓'
+      : passwordInput.value
+        ? '비밀번호가 맞지 않아요'
+        : '이 사이트의 Jev는 비밀번호를 아는 사람만 쓸 수 있어요';
+}
+
+passwordInput.addEventListener('change', () => {
+  applyPassword();
+  refreshJevLock();
+});
+refreshJevLock();
 
 // 경기 중 전략 바꾸기: 보내고 나면 입력칸에서 빠져나와 키보드가 다시 게임을 조작하게 한다.
 const liveStrategy = $('#vs-strategy-live');
@@ -2961,6 +3004,7 @@ function newGame() {
 // 대결: 나 · Jev · 휴리스틱이 같은 시드로 같은 피스 수를 둔다. 같은 시드를 넘기면 같은 순서로 재대결.
 function startVersus(seed = randomSeed()) {
   sfx.unlock();
+  applyPassword();
   setMode('versus');
   game = null;
   hud.reset();
@@ -3114,8 +3158,8 @@ window.addEventListener('keydown', (e) => {
   // 입력칸·체크박스·라디오에서는 글자를 치거나 선택을 바꾸게 둔다.
   // 타이틀의 전략 칸에서 Enter는 대결 시작, 경기 중 전략 칸의 Enter는 폼 제출(전략 바꾸기).
   const field = e.target;
-  if (field instanceof HTMLInputElement && ['text', 'checkbox', 'radio'].includes(field.type)) {
-    if (field.id === 'vs-strategy' && e.code === 'Enter' && !e.isComposing) {
+  if (field instanceof HTMLInputElement && ['text', 'password', 'checkbox', 'radio'].includes(field.type)) {
+    if ((field.id === 'vs-strategy' || field.id === 'vs-password') && e.code === 'Enter' && !e.isComposing) {
       e.preventDefault();
       startVersus();
     }

@@ -1325,6 +1325,19 @@ kbd.wide {
   font: 700 13px/1.3 var(--font-body);
 }
 
+.vs-password[hidden] {
+  display: none;
+}
+
+.vs-password[data-state='ready'] small {
+  color: var(--piece-s);
+  font-weight: 800;
+}
+
+.vs-password[data-state='locked'] small {
+  color: var(--accent);
+}
+
 .vs-strategy small,
 .vs-option small {
   font-weight: 600;

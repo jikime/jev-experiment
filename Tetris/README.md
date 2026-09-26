@@ -70,6 +70,19 @@ npm run bench -- --bots heuristic-look,jev-plus --seeds 101-110 --pieces 50
 
 비용은 피스 하나에 요청 하나(다시 물으면 둘), 입력 약 5~7천 토큰입니다(입력 100만 토큰당 $0.042, 출력 무료 기준 20피스에 약 $0.006, 50피스 벤치마크 한 판에 약 $0.015). 응답은 보통 0.2~0.3초이고, 기다리는 동안 Jev 레인은 중력이 멈추므로 느려도 결과는 같습니다. Jev 요청이 실패하면 그 수는 휴리스틱의 수로 대신 두고 `대체`로 셉니다.
 
+## 배포 (Vercel)
+
+1. Vercel 프로젝트 설정: **Root Directory `Tetris`**, Framework Preset `Other`. Build Command는 `npm run build`가 자동으로 잡히고, Node는 `package.json`의 `22.x`를 씁니다.
+2. **Environment Variables**에 넣습니다.
+   - `TYPESAFE_API_KEY` — 필수. 없으면 배포 사이트에서 Jev 레인이 빠집니다.
+   - `JEV_PASSWORD` — 선택. 넣으면 **비밀번호를 아는 사람만** 배포 사이트에서 Jev를 쓸 수 있습니다. 대결 화면이 아니라 타이틀의 "Jev 비밀번호" 칸에 넣고, 맞으면 "확인됐어요 ✓"가 뜹니다.
+3. 환경변수를 바꾼 뒤에는 다시 배포(Redeploy)해야 반영됩니다.
+
+- 비밀번호는 **코드나 저장소에 적지 않습니다**(저장소가 공개라 누구나 볼 수 있다). 확인도 서버에서만 합니다. 브라우저 코드(`dist/tetris.js`)는 방문자 누구나 받아 볼 수 있어서입니다.
+- `api/jev/index.js`(요청 중계)와 `api/jev/status.js`(상태 확인)가 Vercel 함수이고, 개발 서버와 같은 `scripts/jev-api.mjs`를 씁니다.
+- 틀린 비밀번호에는 0.8초 늦게 답해 여러 번 대입해 보는 걸 느리게 합니다. 그래도 짧은 숫자 비밀번호는 오래 두드리면 맞힐 수 있으니, 널리 공개할 땐 더 긴 비밀번호가 안전합니다.
+- 로컬에서도 `Tetris/.env`에 `JEV_PASSWORD=...`를 넣으면 똑같이 잠급니다(없으면 잠그지 않음).
+
 ## 조작
 
 | 키 | 동작 |
@@ -109,6 +122,7 @@ src/versus.js 대결 모드(세 레인·결정 카드·결과표)
 src/main.js   화면 흐름(타이틀 → READY/GO → 플레이 → 일시정지/게임 오버·결과)
 dist/         빌드 결과(tetris.js) — 직접 고치지 않는다
 scripts/      build.mjs(의존성 없는 번들러) · serve.mjs(개발 서버 + Jev 프록시) · bench.mjs(봇 벤치마크)
-              jev-client.mjs(.env·재시도 — 서버와 벤치마크 공용)
+              jev-client.mjs(.env·재시도) · jev-api.mjs(비밀번호 확인·중계 — 개발 서버와 Vercel 함수 공용)
+api/jev/      Vercel 함수(index.js = POST /api/jev, status.js = GET /api/jev/status)
 tests/        node:test 규칙·봇·번들 테스트 (Jev API는 부르지 않는다)
 ```
