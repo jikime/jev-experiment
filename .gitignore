@@ -9,3 +9,5 @@ bench-out/
 
 # Vercel 배포 빌드 결과(npm run vercel-build)
 public/
+.vercel
+.env*
