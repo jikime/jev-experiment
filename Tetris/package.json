@@ -11,6 +11,6 @@
     "bench": "node scripts/bench.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": "22.x"
   }
 }
