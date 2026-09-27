@@ -199,10 +199,22 @@
                 <label><input type="radio" name="vs-jev-mode" value="plus" checked /> <b>Jev+</b> <small>휴리스틱이 고른 안전한 5수 중에서 선택 (추천)</small></label>
                 <label><input type="radio" name="vs-jev-mode" value="solo" /> <b>Jev 단독</b> <small>모든 후보에서 직접 선택</small></label>
               </fieldset>
-              <label class="vs-strategy vs-password" id="vs-password-row" hidden>
-                <span>Jev 비밀번호 <small id="vs-password-note">이 사이트의 Jev는 비밀번호를 아는 사람만 쓸 수 있어요</small></span>
-                <input type="password" id="vs-password" maxlength="64" autocomplete="off" />
-              </label>
+              <div class="vs-auth" id="vs-auth" hidden>
+                <fieldset class="vs-mode" id="vs-auth-mode">
+                  <legend>Jev를 쓰는 방법</legend>
+                  <label><input type="radio" name="vs-auth" value="password" checked /> <b>비밀번호</b> <small>이 사이트의 키로 둬요</small></label>
+                  <label><input type="radio" name="vs-auth" value="key" /> <b>내 TypeSafe 키</b> <small>비밀번호 없이 내 키로 시험해요 · 요금은 내 계정에</small></label>
+                </fieldset>
+                <label class="vs-strategy vs-password" id="vs-password-row">
+                  <span>Jev 비밀번호 <small id="vs-password-note">이 사이트의 Jev는 비밀번호를 아는 사람만 쓸 수 있어요</small></span>
+                  <input type="password" id="vs-password" maxlength="64" autocomplete="off" />
+                </label>
+                <div class="vs-strategy vs-password" id="vs-key-row" hidden>
+                  <label for="vs-key">내 TypeSafe API 키 <small id="vs-key-note">키를 넣으면 비밀번호 없이 Jev가 참가해요</small></label>
+                  <input type="password" id="vs-key" maxlength="256" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="TypeSafe 콘솔에서 만든 API 키" />
+                  <p class="vs-key-help">키는 이 탭에만 보관하고(탭을 닫으면 지워져요), 사이트 서버는 TypeSafe로 넘기기만 하고 저장하지 않아요. <a href="https://console.typesafe.ai/keys" target="_blank" rel="noopener noreferrer">키 만들기 ↗</a></p>
+                </div>
+              </div>
               <label class="vs-strategy">
                 <span>Jev에게 전략 말하기 <small>(선택 · 비워 두면 기본 플레이)</small></span>
                 <input type="text" id="vs-strategy" maxlength="120" autocomplete="off" placeholder="예: 오른쪽 끝 한 줄을 비워 두고 테트리스를 노려" />

@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 import { OUT, writeBundle } from './build.mjs';
 import { JEV_MODEL, ROOT as root, apiKey } from './jev-client.mjs';
-import { jevResponse, passwordRequired, statusResponse } from './jev-api.mjs';
+import { USER_KEY_HEADER, jevResponse, passwordRequired, statusResponse } from './jev-api.mjs';
 
 const port = Number(process.env.PORT) || 5173;
 // 기본은 이 컴퓨터에서만 접속: IPv4·IPv6 루프백 둘 다 연다(macOS는 localhost를 ::1로 먼저 풀기도 한다).
@@ -56,7 +56,8 @@ async function proxyJev(req, res) {
   }
   const { status, body } = await jevResponse(req.headers, payload);
   const note = body.requestId ? ` ${body.requestId}` : status === 200 ? '' : ` ${body.error}`;
-  console.log(`[jev] ${status}${body.upstreamMs ? ` ${body.upstreamMs}ms` : ''}${note}`);
+  const who = req.headers[USER_KEY_HEADER] ? ' (방문자 키)' : ''; // 키 자체는 찍지 않는다
+  console.log(`[jev] ${status}${body.upstreamMs ? ` ${body.upstreamMs}ms` : ''}${who}${note}`);
   sendJson(res, status, body);
 }
 
@@ -103,7 +104,7 @@ async function handle(req, res) {
 function announce() {
   const everywhere = hosts.some((h) => h === '0.0.0.0' || h === '::');
   console.log(`테트리스 → http://localhost:${port}`);
-  console.log(apiKey() ? `Jev 준비됨 (모델: ${JEV_MODEL}${passwordRequired() ? ', 비밀번호 잠금' : ''})` : 'Jev 꺼짐: Tetris/.env에 TYPESAFE_API_KEY를 넣으면 대결에 참가해요.');
+  console.log(apiKey() ? `Jev 준비됨 (모델: ${JEV_MODEL}${passwordRequired() ? ', 비밀번호 잠금' : ''})` : 'Jev 꺼짐: Tetris/.env에 TYPESAFE_API_KEY를 넣거나, 타이틀에서 내 TypeSafe 키를 넣으면 대결에 참가해요.');
   if (everywhere) console.log('주의: 같은 네트워크의 다른 기기도 접속할 수 있어요 (Jev 프록시 포함).');
 }
 

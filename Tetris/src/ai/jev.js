@@ -3,7 +3,8 @@ import { enumerateMoves } from '../core/placements.js';
 import { attachFollowUps, rankMoves } from './heuristic.js';
 import { allowedByPolicy } from './policy.js';
 
-// 브라우저는 키 없이 개발 서버의 프록시(/api/jev)만 부른다. 키는 서버의 Tetris/.env에 있다.
+// 브라우저는 개발 서버·배포 함수의 프록시(/api/jev)만 부른다. 서버 키는 Tetris/.env(배포는 Vercel 환경변수)에 있고,
+// 방문자가 자기 TypeSafe 키를 넣었을 때만 그 키가 헤더에 실려 프록시로 간다.
 export const JEV_ENDPOINT = '/api/jev';
 // 입력 100만 토큰당 가격(출력 토큰은 무료). docs.typesafe.ai/models 기준(2026-09). 화면에는 "추정"으로 표시.
 export const JEV_PRICE_PER_MTOK = 0.042;
@@ -162,29 +163,50 @@ export function buildJevRequest(snapshot, moves, { board = false, recheck = fals
 
 // ── 서버 호출 ──────────────────────────────────────────
 
-// 서버가 비밀번호로 잠겨 있으면(JEV_PASSWORD) 요청마다 헤더로 보낸다. 확인은 서버가 한다.
+// 두 방법 중 하나를 요청마다 헤더로 보낸다. 확인은 서버가 한다.
+//   비밀번호: 서버가 잠겨 있으면(JEV_PASSWORD) 비밀번호를 보내고, 서버 키로 부른다.
+//   내 키: 방문자의 TypeSafe 키를 보낸다. 서버는 비밀번호 없이 그 키로 부르고(요금은 그 계정에), 저장하지 않는다.
 let password = '';
+let userKey = '';
 export function setJevPassword(value) {
   password = String(value ?? '').trim();
 }
-const authHeaders = () => (password ? { 'x-jev-password': password } : {});
+export function setJevKey(value) {
+  userKey = String(value ?? '').trim();
+}
+// 서버(scripts/jev-api.mjs)와 같은 규칙. 헤더에 실을 수 없는 글자(한글·공백)가 섞이면 보내기 전에 거른다.
+const USER_KEY_PATTERN = /^[\x21-\x7e]{8,256}$/;
+const KEY_FORMAT_ERROR = 'TypeSafe 키 형식이 아니에요.';
+const keyUsable = () => USER_KEY_PATTERN.test(userKey);
+const authHeaders = () => (userKey ? (keyUsable() ? { 'x-typesafe-key': userKey } : {}) : password ? { 'x-jev-password': password } : {});
 
-// ready: 참가 가능 · locked: 비밀번호가 없거나 틀림 · nokey: 서버에 키가 없음 · offline: 개발 서버·배포 함수가 없음(file:// 등)
-// locked 필드: 서버가 비밀번호를 요구하는지(맞게 넣었어도 true).
+// state — ready: 참가 가능 · locked: 비밀번호가 없거나 틀림 · badkey: 내 키로 부를 수 없음 · nokey: 서버에 키가 없음
+//         · offline: 개발 서버·배포 함수가 없음(file:// 등)
+// locked·configured: 서버가 비밀번호를 요구하는지, 서버 키가 있는지(서버 설정 그대로). usingKey: 내 키를 보냈는지.
+// source: ready일 때 어느 키로 부르는지('server' | 'user').
 export async function jevStatus() {
+  const usingKey = Boolean(userKey);
   try {
     const res = await fetch(`${JEV_ENDPOINT}/status`, { cache: 'no-store', headers: authHeaders() });
-    if (!res.ok) return { state: 'offline', locked: false };
+    if (!res.ok) return { state: 'offline', locked: false, configured: false, usingKey };
     const body = await res.json();
-    if (!body.configured) return { state: 'nokey', locked: Boolean(body.locked) };
-    if (body.locked && !body.authorized) return { state: 'locked', locked: true, hasPassword: Boolean(password) };
-    return { state: 'ready', model: body.model, locked: Boolean(body.locked) };
+    const server = { locked: Boolean(body.locked), configured: Boolean(body.configured), model: body.model, usingKey };
+    if (usingKey && !keyUsable()) return { ...server, state: 'badkey', keyStatus: 400, error: KEY_FORMAT_ERROR };
+    if (body.keySource === 'user') {
+      return body.authorized
+        ? { ...server, state: 'ready', source: 'user' }
+        : { ...server, state: 'badkey', keyStatus: body.keyStatus, error: body.keyError };
+    }
+    if (!body.configured) return { ...server, state: 'nokey' };
+    if (body.locked && !body.authorized) return { ...server, state: 'locked', hasPassword: Boolean(password) };
+    return { ...server, state: 'ready', source: 'server' };
   } catch {
-    return { state: 'offline', locked: false };
+    return { state: 'offline', locked: false, configured: false, usingKey };
   }
 }
 
 export async function askJev(request, { timeoutMs = 20_000 } = {}) {
+  if (userKey && !keyUsable()) throw new Error(KEY_FORMAT_ERROR);
   const started = performance.now();
   const res = await fetch(JEV_ENDPOINT, {
     method: 'POST',

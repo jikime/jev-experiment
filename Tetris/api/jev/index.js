@@ -1,5 +1,5 @@
-// Vercel 함수: POST /api/jev — 비밀번호를 확인하고 TypeSafe로 넘긴다(처리는 scripts/jev-api.mjs).
-// Vercel 환경변수: TYPESAFE_API_KEY(필수), JEV_PASSWORD(설정하면 비밀번호를 아는 사람만 Jev를 쓴다).
+// Vercel 함수: POST /api/jev — 비밀번호(또는 방문자의 TypeSafe 키)를 확인하고 TypeSafe로 넘긴다(처리는 scripts/jev-api.mjs).
+// Vercel 환경변수: TYPESAFE_API_KEY(서버 키), JEV_PASSWORD(설정하면 비밀번호를 아는 사람이나 자기 키를 넣은 사람만 Jev를 쓴다).
 import { jevResponse } from '../../scripts/jev-api.mjs';
 
 export default async function handler(req, res) {

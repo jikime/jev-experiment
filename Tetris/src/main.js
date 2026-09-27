@@ -4,9 +4,9 @@ import { InputController, KEY_ACTIONS, bindTouchPad } from './ui/input.js';
 import { BoardRenderer, PreviewRenderer, readPalette } from './ui/renderer.js';
 import { Hud, describeClear, formatNumber, formatTime } from './ui/hud.js';
 import { Sfx } from './ui/audio.js';
-import { storage } from './ui/storage.js';
+import { storage, tabStorage } from './ui/storage.js';
 import { VERSUS_LIMITS, Versus } from './versus.js';
-import { jevStatus, setJevPassword } from './ai/jev.js';
+import { jevStatus, setJevKey, setJevPassword } from './ai/jev.js';
 
 const READY_MS = 900;
 const GO_MS = 600;
@@ -49,36 +49,85 @@ for (const radio of jevModeInputs) {
 }
 const jevMode = () => jevModeInputs.find((radio) => radio.checked)?.value ?? 'plus';
 
-// 배포 사이트의 Jev가 비밀번호로 잠겨 있으면 입력칸을 보여 준다. 확인은 서버가 하고, 이 브라우저에만 기억한다.
+// 배포 사이트의 Jev가 비밀번호로 잠겨 있거나 서버에 키가 없으면, 비밀번호나 내 TypeSafe 키를 넣는 칸을 보여 준다.
+// 확인은 서버가 한다. 비밀번호는 이 브라우저에, 키는 이 탭에만(tabStorage) 기억한다.
+const authBox = $('#vs-auth');
+const authModeField = $('#vs-auth-mode');
+const authModeInputs = [...document.querySelectorAll('input[name="vs-auth"]')];
 const passwordRow = $('#vs-password-row');
 const passwordInput = $('#vs-password');
 const passwordNote = $('#vs-password-note');
+const keyRow = $('#vs-key-row');
+const keyInput = $('#vs-key');
+const keyNote = $('#vs-key-note');
 passwordInput.value = storage.get('jev-password', '');
-setJevPassword(passwordInput.value);
+keyInput.value = tabStorage.get('jev-key', '');
+let authMode = storage.get('jev-auth', 'password') === 'key' ? 'key' : 'password';
+let serverHasKey = true; // 서버에 키가 없으면 비밀번호로는 쓸 수 없으니 내 키만 받는다
+let authChecks = 0;
+const usingOwnKey = () => authMode === 'key' || !serverHasKey;
 
-function applyPassword() {
-  setJevPassword(passwordInput.value);
+function applyAuth() {
+  setJevKey(usingOwnKey() ? keyInput.value : '');
+  setJevPassword(usingOwnKey() ? '' : passwordInput.value);
   storage.set('jev-password', passwordInput.value.trim());
+  tabStorage.set('jev-key', keyInput.value.trim());
 }
 
-async function refreshJevLock() {
+function renderAuthMode() {
+  for (const radio of authModeInputs) radio.checked = radio.value === (usingOwnKey() ? 'key' : 'password');
+  authModeField.hidden = !serverHasKey;
+  passwordRow.hidden = usingOwnKey();
+  keyRow.hidden = !usingOwnKey();
+}
+
+function keyMessage(status) {
+  if (!keyInput.value.trim()) return serverHasKey ? '키를 넣으면 비밀번호 없이 Jev가 참가해요' : '이 서버에는 키가 없어 내 키로만 Jev가 참가해요';
+  if (status.state === 'ready') return '확인됐어요 ✓ 요금은 내 TypeSafe 계정에 나가요';
+  if (status.keyStatus === 401) return '키가 맞지 않아요';
+  return `확인하지 못했어요 · ${String(status.error ?? '').slice(0, 90)}`;
+}
+
+async function refreshJevAuth() {
+  const check = ++authChecks;
+  applyAuth();
+  renderAuthMode();
+  if (usingOwnKey() && keyInput.value.trim()) {
+    keyRow.dataset.state = 'checking';
+    keyNote.textContent = '확인 중…';
+  }
   const status = await jevStatus();
-  passwordRow.hidden = !status.locked;
-  if (!status.locked) return;
-  passwordRow.dataset.state = status.state;
-  passwordNote.textContent =
-    status.state === 'ready'
-      ? '확인됐어요 ✓'
-      : passwordInput.value
-        ? '비밀번호가 맞지 않아요'
-        : '이 사이트의 Jev는 비밀번호를 아는 사람만 쓸 수 있어요';
+  if (check !== authChecks) return; // 그사이 입력을 또 바꿨다
+  if (status.state !== 'offline' && serverHasKey !== status.configured) {
+    serverHasKey = status.configured;
+    return refreshJevAuth(); // 쓸 수 있는 방법이 달라졌으니 그 방법으로 다시 확인
+  }
+  authBox.hidden = status.state === 'offline' || !(status.locked || !status.configured || status.usingKey);
+  if (authBox.hidden) return;
+  if (usingOwnKey()) {
+    keyRow.dataset.state = keyInput.value.trim() ? status.state : '';
+    keyNote.textContent = keyMessage(status);
+  } else {
+    passwordRow.dataset.state = status.state;
+    passwordNote.textContent =
+      status.state === 'ready'
+        ? '확인됐어요 ✓'
+        : passwordInput.value
+          ? '비밀번호가 맞지 않아요'
+          : '이 사이트의 Jev는 비밀번호를 아는 사람만 쓸 수 있어요';
+  }
 }
 
-passwordInput.addEventListener('change', () => {
-  applyPassword();
-  refreshJevLock();
-});
-refreshJevLock();
+for (const radio of authModeInputs) {
+  radio.addEventListener('change', () => {
+    authMode = radio.value;
+    storage.set('jev-auth', authMode);
+    refreshJevAuth();
+  });
+}
+passwordInput.addEventListener('change', refreshJevAuth);
+keyInput.addEventListener('change', refreshJevAuth);
+refreshJevAuth();
 
 // 경기 중 전략 바꾸기: 보내고 나면 입력칸에서 빠져나와 키보드가 다시 게임을 조작하게 한다.
 const liveStrategy = $('#vs-strategy-live');
@@ -131,7 +180,7 @@ function newGame() {
 // 대결: 나 · Jev · 휴리스틱이 같은 시드로 같은 피스 수를 둔다. 같은 시드를 넘기면 같은 순서로 재대결.
 function startVersus(seed = randomSeed()) {
   sfx.unlock();
-  applyPassword();
+  applyAuth();
   setMode('versus');
   game = null;
   hud.reset();
@@ -286,7 +335,7 @@ window.addEventListener('keydown', (e) => {
   // 타이틀의 전략 칸에서 Enter는 대결 시작, 경기 중 전략 칸의 Enter는 폼 제출(전략 바꾸기).
   const field = e.target;
   if (field instanceof HTMLInputElement && ['text', 'password', 'checkbox', 'radio'].includes(field.type)) {
-    if ((field.id === 'vs-strategy' || field.id === 'vs-password') && e.code === 'Enter' && !e.isComposing) {
+    if (['vs-strategy', 'vs-password', 'vs-key'].includes(field.id) && e.code === 'Enter' && !e.isComposing) {
       e.preventDefault();
       startVersus();
     }

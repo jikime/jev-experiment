@@ -83,6 +83,15 @@ npm run bench -- --bots heuristic-look,jev-plus --seeds 101-110 --pieces 50
 - 틀린 비밀번호에는 0.8초 늦게 답해 여러 번 대입해 보는 걸 느리게 합니다. 그래도 짧은 숫자 비밀번호는 오래 두드리면 맞힐 수 있으니, 널리 공개할 땐 더 긴 비밀번호가 안전합니다.
 - 로컬에서도 `Tetris/.env`에 `JEV_PASSWORD=...`를 넣으면 똑같이 잠급니다(없으면 잠그지 않음).
 
+### 내 TypeSafe 키로 시험하기
+
+비밀번호를 모르는 방문자도 자기 키로 Jev를 쓸 수 있습니다. 타이틀의 "Jev를 쓰는 방법"에서 **내 TypeSafe 키**를 고르고 [콘솔](https://console.typesafe.ai/keys)에서 만든 키를 넣으면, 서버가 작은 요청 한 번으로 확인한 뒤 "확인됐어요 ✓"를 띄웁니다. 대결 화면 위에는 `Jev 연결됨 · jev-1.13.0 · 내 키`로 표시됩니다.
+
+- 요청은 여전히 `/api/jev`를 거칩니다. 브라우저가 키를 `x-typesafe-key` 헤더에 실어 보내면, 서버는 비밀번호 없이 **그 키로만** TypeSafe를 부르고 서버 키는 쓰지 않습니다. 요금은 방문자 계정에 나갑니다.
+- 서버는 방문자 키를 저장하거나 로그에 남기지 않습니다(개발 서버 로그에는 `(방문자 키)` 표시만 붙습니다). 브라우저는 키를 `sessionStorage`에만 두므로 탭을 닫으면 지워집니다.
+- 대결을 시작할 때마다 키를 한 번 확인합니다. 입력 수백 토큰짜리 요청이라 $0.0001도 들지 않습니다.
+- 서버에 `TYPESAFE_API_KEY`가 없으면(예: 키 없이 배포한 복제본) 비밀번호 선택지를 숨기고 내 키만 받습니다. 로컬에서 `.env` 없이 `npm start`로 연 경우도 같습니다.
+
 ## 조작
 
 | 키 | 동작 |
@@ -122,7 +131,7 @@ src/versus.js 대결 모드(세 레인·결정 카드·결과표)
 src/main.js   화면 흐름(타이틀 → READY/GO → 플레이 → 일시정지/게임 오버·결과)
 dist/         빌드 결과(tetris.js) — 직접 고치지 않는다
 scripts/      build.mjs(의존성 없는 번들러) · serve.mjs(개발 서버 + Jev 프록시) · bench.mjs(봇 벤치마크)
-              jev-client.mjs(.env·재시도) · jev-api.mjs(비밀번호 확인·중계 — 개발 서버와 Vercel 함수 공용)
+              jev-client.mjs(.env·재시도) · jev-api.mjs(비밀번호·방문자 키 확인과 중계 — 개발 서버와 Vercel 함수 공용)
 api/jev/      Vercel 함수(index.js = POST /api/jev, status.js = GET /api/jev/status)
 tests/        node:test 규칙·봇·번들 테스트 (Jev API는 부르지 않는다)
 ```

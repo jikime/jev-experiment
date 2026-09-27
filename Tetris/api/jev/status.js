@@ -1,4 +1,4 @@
-// Vercel 함수: GET /api/jev/status — 키가 있는지, 잠겨 있는지, 보낸 비밀번호가 맞는지.
+// Vercel 함수: GET /api/jev/status — 키가 있는지, 잠겨 있는지, 보낸 비밀번호나 방문자 키로 부를 수 있는지.
 import { statusResponse } from '../../scripts/jev-api.mjs';
 
 export default async function handler(req, res) {

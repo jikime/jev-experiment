@@ -297,9 +297,12 @@ export class Versus {
     this.jev = status;
     const text = {
       checking: 'Jev 연결 확인 중…',
-      ready: `Jev 연결됨 · ${status.model}`,
-      nokey: 'Jev 꺼짐 · 서버에 TYPESAFE_API_KEY가 없어요',
-      locked: status.hasPassword ? 'Jev 꺼짐 · 비밀번호가 맞지 않아요 (타이틀에서 다시 입력)' : 'Jev 꺼짐 · 비밀번호가 필요해요 (타이틀에서 입력)',
+      ready: `Jev 연결됨 · ${status.model}${status.source === 'user' ? ' · 내 키' : ''}`,
+      nokey: 'Jev 꺼짐 · 서버에 키가 없어요 (타이틀에서 내 TypeSafe 키 입력)',
+      locked: status.hasPassword
+        ? 'Jev 꺼짐 · 비밀번호가 맞지 않아요 (타이틀에서 다시 입력)'
+        : 'Jev 꺼짐 · 비밀번호나 내 TypeSafe 키가 필요해요 (타이틀에서 입력)',
+      badkey: 'Jev 꺼짐 · 내 TypeSafe 키를 쓸 수 없어요 (타이틀에서 다시 입력)',
       offline: 'Jev 꺼짐 · 서버(npm start 또는 배포 사이트)로 연 페이지에서만 참가해요',
     }[status.state];
     this.el.jev.textContent = text;

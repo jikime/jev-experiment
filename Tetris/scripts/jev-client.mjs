@@ -80,10 +80,11 @@ function upstreamError(data, status) {
 }
 
 // { state, questions, model? } → { ok, status, data, requestId, upstreamMs }
-export async function callJev({ state, questions, model }) {
+// key: 방문자가 자기 키를 보냈으면 그 키, 아니면 서버 키.
+export async function callJev({ state, questions, model }, key = apiKey()) {
   const body = JSON.stringify({ state, questions, model: typeof model === 'string' ? model : JEV_MODEL });
   const started = performance.now();
-  const res = await postWithRetry(body);
+  const res = await postWithRetry(body, key);
   const requestId = res.headers.get('x-typesafe-request-id') ?? undefined;
   const text = await res.text();
   let data;
